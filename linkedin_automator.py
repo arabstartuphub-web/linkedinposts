@@ -5,12 +5,12 @@ import psycopg2
 import requests
 import warnings
 
-# Suppress the Google deprecation/FutureWarnings to keep your GitHub Action logs clean
+# Suppress Google deprecation/FutureWarnings to keep your GitHub Action execution logs clean
 warnings.filterwarnings("ignore", category=FutureWarning)
 
 import google.generativeai as genai
 
-# 1. Load Environment Variables
+# 1. Load and Verify Environment Variables
 DB_URL = os.environ.get("DATABASE_URL")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 WEBHOOK_URL = os.environ.get("MAKE_WEBHOOK_URL")
@@ -19,10 +19,10 @@ if not all([DB_URL, GEMINI_API_KEY, WEBHOOK_URL]):
     print("Error: Missing one or more required environment variables (DATABASE_URL, GEMINI_API_KEY, MAKE_WEBHOOK_URL).")
     sys.exit(1)
 
-# Configure Gemini
+# Configure Gemini Connection
 genai.configure(api_key=GEMINI_API_KEY)
 
-# Daily Schedule Mapping: Allocates one specific tag to each day of the week
+# Daily Schedule Country Mapping
 DAY_MAP = {
     "Monday": "Saudi Arabia",
     "Tuesday": "UAE",
@@ -32,24 +32,6 @@ DAY_MAP = {
     "Saturday": "Bahrain",
     "Sunday": "GCC"
 }
-
-def get_best_available_model():
-    """Dynamically scans your API key to find an active text generation model."""
-    preferred_models = ['gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-1.5-flash']
-    try:
-        available_models = []
-        for m in genai.list_models():
-            if 'generateContent' in m.supported_generation_methods:
-                available_models.append(m.name.replace('models/', ''))
-        
-        for model_name in preferred_models:
-            if model_name in available_models:
-                return model_name
-        if available_models:
-            return available_models[0]
-    except Exception:
-        pass
-    return 'gemini-2.5-flash'
 
 def get_daily_article(country_name):
     """Fetches exactly ONE latest unposted article for the specified country."""
@@ -69,7 +51,7 @@ def get_daily_article(country_name):
     return article
 
 def generate_linkedin_content(model_name, title, summary, country):
-    """Uses Gemini to generate a structured LinkedIn post copy."""
+    """Uses Gemini to generate structured LinkedIn post text."""
     model = genai.GenerativeModel(model_name)
     
     prompt = f"""
@@ -99,7 +81,6 @@ def post_to_linkedin_via_webhook(text, article_url):
     
     try:
         res = requests.post(WEBHOOK_URL, json=payload)
-        # Accept both 200 OK and 201 Created responses as successes
         if res.status_code in [200, 201]:
             return True
         else:
@@ -119,7 +100,7 @@ def update_db_status(article_id):
     conn.close()
 
 def main():
-    # Detect the day of the week
+    # Detect the current day of the week
     current_day = datetime.datetime.now().strftime('%A')
     target_country = DAY_MAP.get(current_day)
     
@@ -139,13 +120,27 @@ def main():
     art_id, title, summary, source_url, country = article
     print(f"Found article ID {art_id}: '{title}'")
     
-    selected_model = get_best_available_model()
-    print(f"Generating post copy via {selected_model}...")
+    # Sequential model fallback array to absorb quota exhaustions seamlessly
+    models_to_try = ['gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-1.5-flash']
+    linkedin_text = None
     
-    try:
-        linkedin_text = generate_linkedin_content(selected_model, title, summary, country)
-    except Exception as e:
-        print(f"Gemini Generation Error: {e}")
+    for model_name in models_to_try:
+        try:
+            print(f"Attempting generation via {model_name}...")
+            linkedin_text = generate_linkedin_content(model_name, title, summary, country)
+            print(f"Successfully generated copy using {model_name}!")
+            break
+        except Exception as e:
+            error_str = str(e).lower()
+            if "429" in error_str or "quota" in error_str:
+                print(f"⚠️ {model_name} free tier rate limit hit. Rolling over to next available model...")
+                continue
+            else:
+                print(f"Fatal Generation Error under {model_name}: {e}")
+                sys.exit(1)
+                
+    if not linkedin_text:
+        print("Error: All fallback Gemini models exhausted or rate-limited for today.")
         sys.exit(1)
         
     print(f"Routing generated content to Make.com Webhook...")
