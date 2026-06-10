@@ -6,7 +6,7 @@ import requests
 import warnings
 import re
 
-# Suppress Google deprecation/FutureWarnings to keep logs clean
+# Suppress Google deprecation/FutureWarnings to keep your GitHub Action execution logs clean
 warnings.filterwarnings("ignore", category=FutureWarning)
 
 import google.generativeai as genai
@@ -35,7 +35,7 @@ DAY_MAP = {
 }
 
 def get_daily_article(country_name):
-    """Fetches exactly ONE latest unposted article for the specified country."""
+    """Fetches exactly ONE latest unposted article for the specified country from Neon DB."""
     query = """
         SELECT id, title, summary, source_url, country 
         FROM articles 
@@ -52,22 +52,35 @@ def get_daily_article(country_name):
     return article
 
 def extract_og_image(url):
-    """Scrapes the target webpage to pull the Open Graph thumbnail image link."""
+    """Scrapes the target webpage to pull the Open Graph thumbnail image link with robust fallbacks."""
     try:
+        # Use a realistic desktop browser header to prevent premium sites like Forbes from blocking the request
         headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36"
+            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.5"
         }
-        res = requests.get(url, headers=headers, timeout=8)
+        res = requests.get(url, headers=headers, timeout=10)
         if res.status_code == 200:
             html = res.text
-            # Regex patterns to locate og:image property content
-            match = re.search(r'<meta\s+[^>]*property=["\']og:image["\'][^>]*content=["\']([^"\']+)["\']', html, re.IGNORECASE)
-            if not match:
-                match = re.search(r'<meta\s+[^>]*content=["\']([^"\']+)["\'][^>]*property=["\']og:image["\']', html, re.IGNORECASE)
-            if match:
-                return match.group(1)
+            
+            # 1. Primary Check: Standard og:image properties
+            img_match = re.search(r'<meta\s+[^>]*property=["\']og:image["\'][^>]*content=["\']([^"\']+)["\']', html, re.IGNORECASE)
+            if not img_match:
+                img_match = re.search(r'<meta\s+[^>]*content=["\']([^"\']+)["\'][^>]*property=["\']og:image["\']', html, re.IGNORECASE)
+            
+            # 2. Secondary Check: Twitter image card if og:image is missing
+            if not img_match:
+                img_match = re.search(r'<meta\s+[^>]*name=["\']twitter:image["\']\s+[^>]*content=["\']([^"\']+)["\']', html, re.IGNORECASE)
+                
+            if img_match:
+                img_url = img_match.group(1).strip()
+                # Fix relative protocol paths (e.g., //cdn.com/img.jpg -> https://cdn.com/img.jpg)
+                if img_url.startswith("//"):
+                    img_url = "https:" + img_url
+                return img_url
     except Exception as e:
-        print(f"Warning: Could not extract Open Graph thumbnail from page: {e}")
+        print(f"Warning: Could not scrape Open Graph thumbnail from page: {e}")
     return None
 
 def generate_linkedin_content(model_name, title, summary, country):
@@ -93,7 +106,7 @@ def generate_linkedin_content(model_name, title, summary, country):
     return response.text
 
 def post_to_linkedin_via_webhook(text, article_url, title, thumbnail_url):
-    """Routes the complete bundle data downstream to the Make.com Webhook."""
+    """Routes the compiled post data and asset links over to Make.com."""
     payload = {
         "text": text,
         "url": article_url,
@@ -137,49 +150,57 @@ def main():
         print(f"No new unposted articles found for {target_country} today. Skipping execution.")
         return
 
-    art_id, title, summary, source_url, country = article
-    print(f"Found article ID {art_id}: '{title}'")
+    art_id, db_title, summary, source_url, country = article
+    print(f"Found article ID {art_id}: '{db_title}'")
     
-    print(f"Inspecting source URL for Open Graph preview card assets...")
+    # Clean and enforce a solid article title backup string
+    if db_title and db_title.strip():
+        final_title = db_title.strip()
+    else:
+        final_title = "GCC Startup Ecosystem Update"
+
+    print(f"Inspecting source webpage for thumbnail elements...")
     scraped_thumb = extract_og_image(source_url)
     
-    if scraped_thumb:
-        thumbnail_url = scraped_thumb
-        print(f"Scraped thumbnail image URL: {thumbnail_url}")
+    # Safe validation check: If scraper comes up completely empty, assign fallback image URL
+    if scraped_thumb and scraped_thumb.strip():
+        final_thumbnail_url = scraped_thumb.strip()
+        print(f"Successfully scraped thumbnail URL: {final_thumbnail_url}")
     else:
-        # High-quality fallback stock workspace thumbnail to ensure HTTP module never catches an empty bundle parameter
-        thumbnail_url = "https://images.unsplash.com/photo-1522071820081-009f0129c71c?auto=format&fit=crop&w=1200&h=627&q=80"
-        print(f"No custom image found on source site. Using professional fallback: {thumbnail_url}")
+        # Premium fallback workspace asset link so Make never catches an empty variable block
+        final_thumbnail_url = "https://images.unsplash.com/photo-1522071820081-009f0129c71c?auto=format&fit=crop&w=1200&h=627&q=80"
+        print(f"Using default premium ecosystem preview asset fallback: {final_thumbnail_url}")
     
+    # Roll-over fallback array to safeguard operations against API account limit variations
     models_to_try = ['gemini-2.5-flash', 'gemini-3.5-flash', 'gemini-3.1-flash-lite', 'gemini-2.0-flash']
     linkedin_text = None
     
     for model_name in models_to_try:
         try:
-            print(f"Attempting generation via {model_name}...")
-            linkedin_text = generate_linkedin_content(model_name, title, summary, country)
+            print(f"Attempting content generation via {model_name}...")
+            linkedin_text = generate_linkedin_content(model_name, final_title, summary, country)
             break
         except Exception as e:
             error_str = str(e).lower()
             if "429" in error_str or "quota" in error_str or "limit" in error_str:
-                print(f"⚠️ {model_name} rate limit hit. Testing next fallback variant...")
+                print(f"⚠️ {model_name} rate thresholds hit. Moving to alternative model selection...")
                 continue
             else:
-                print(f"Generation Error under {model_name}: {e}")
+                print(f"Generation aborted under model variant {model_name}: {e}")
                 sys.exit(1)
                 
     if not linkedin_text:
-        print("Error: All fallback Gemini models exhausted for today.")
+        print("Fatal Error: All fallback engine variants are currently non-responsive or rate-limited.")
         sys.exit(1)
         
-    print(f"Shipping compiled bundle over to Make.com Webhook...")
-    success = post_to_linkedin_via_webhook(linkedin_text, source_url, title, thumbnail_url)
+    print(f"Forwarding payload bundle parameters down to Make.com integration stream...")
+    success = post_to_linkedin_via_webhook(linkedin_text, source_url, final_title, final_thumbnail_url)
     
     if success:
         update_db_status(art_id)
-        print(f"Success! Webhook fired and Database updated.")
+        print(f"Success! System data published cleanly.")
     else:
-        print(f"Execution stopped due to Webhook Bridge rejection.")
+        print(f"Pipeline tracking stopped due to external endpoint connection errors.")
 
 if __name__ == "__main__":
     main()
