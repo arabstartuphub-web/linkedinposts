@@ -1,5 +1,6 @@
 import os
 import sys
+import datetime
 import psycopg2
 import requests
 import warnings
@@ -13,20 +14,35 @@ import google.generativeai as genai
 DB_URL = os.environ.get("DATABASE_URL")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 LINKEDIN_ACCESS_TOKEN = os.environ.get("LINKEDIN_ACCESS_TOKEN")
-LINKEDIN_ORG_ID = os.environ.get("LINKEDIN_ORG_ID")
+RAW_ORG_ID = os.environ.get("LINKEDIN_ORG_ID")
 
-if not all([DB_URL, GEMINI_API_KEY, LINKEDIN_ACCESS_TOKEN, LINKEDIN_ORG_ID]):
+if not all([DB_URL, GEMINI_API_KEY, LINKEDIN_ACCESS_TOKEN, RAW_ORG_ID]):
     print("Error: Missing one or more environment variables.")
     sys.exit(1)
+
+# Clean and format the LinkedIn Organization ID safely
+CLEAN_ORG_ID = RAW_ORG_ID.strip().replace('"', '').replace("'", "")
+if not CLEAN_ORG_ID.startswith("urn:li:organization:"):
+    LINKEDIN_ORG_ID = f"urn:li:organization:{CLEAN_ORG_ID}"
+else:
+    LINKEDIN_ORG_ID = CLEAN_ORG_ID
 
 # Configure Gemini
 genai.configure(api_key=GEMINI_API_KEY)
 
+# Daily Schedule Mapping: Allocates one specific tag to each day of the week
+DAY_MAP = {
+    "Monday": "Saudi Arabia",
+    "Tuesday": "UAE",
+    "Wednesday": "Qatar",
+    "Thursday": "Kuwait",
+    "Friday": "Oman",
+    "Saturday": "Bahrain",
+    "Sunday": "GCC"
+}
+
 def get_best_available_model():
-    """
-    Dynamically scans your API key to find an active model that supports text generation.
-    This prevents 404 errors when Google deprecates or changes free-tier model identifiers.
-    """
+    """Dynamically scans your API key to find an active text generation model."""
     preferred_models = ['gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-1.5-flash']
     try:
         available_models = []
@@ -34,42 +50,34 @@ def get_best_available_model():
             if 'generateContent' in m.supported_generation_methods:
                 available_models.append(m.name.replace('models/', ''))
         
-        print(f"Active Gemini models for your key: {available_models}")
-        
         for model_name in preferred_models:
             if model_name in available_models:
-                print(f"→ Automatically selected: {model_name}")
                 return model_name
-                
         if available_models:
-            print(f"→ Preferred models not found. Using fallback: {available_models[0]}")
             return available_models[0]
-    except Exception as e:
-        print(f"Notice: Model scanning skipped ({e}). Defaulting to gemini-2.0-flash.")
-    
-    return 'gemini-2.0-flash'
+    except Exception:
+        pass
+    return 'gemini-2.5-flash'
 
-def get_articles_to_post():
-    """
-    Fetches exactly ONE unposted article for EACH country.
-    Matches your exact Neon table schema column names.
-    """
+def get_daily_article(country_name):
+    """Fetches exactly ONE latest unposted article for the specified country."""
     query = """
-        SELECT DISTINCT ON (country) id, title, summary, source_url, country 
+        SELECT id, title, summary, source_url, country 
         FROM articles 
-        WHERE linkedin_posted = FALSE 
-        ORDER BY country, created_at DESC;
+        WHERE linkedin_posted = FALSE AND country = %s
+        ORDER BY created_at DESC
+        LIMIT 1;
     """
     conn = psycopg2.connect(DB_URL)
     cur = conn.cursor()
-    cur.execute(query)
-    articles = cur.fetchall()
+    cur.execute(query, (country_name,))
+    article = cur.fetchone()
     cur.close()
     conn.close()
-    return articles
+    return article
 
 def generate_linkedin_content(model_name, title, summary, country):
-    """Uses the auto-selected Gemini model to generate a snappy, readable LinkedIn post."""
+    """Uses Gemini to generate a structured LinkedIn post copy."""
     model = genai.GenerativeModel(model_name)
     
     prompt = f"""
@@ -82,7 +90,7 @@ def generate_linkedin_content(model_name, title, summary, country):
     Guidelines:
     - Keep it crisp and punchy (use clean line breaks for scannability).
     - Summarize the key impact or takeaway.
-    - Include 2-3 relevant hashtags (e.g., #{country}Startups, #GCCStartups).
+    - Include 2-3 relevant hashtags (e.g., #{country.replace(' ', '')}Startups, #GCCStartups).
     - Do not use placeholders. Focus entirely on the hook and summary.
     - End with a brief engaging question or line to spark discussion.
     """
@@ -133,40 +141,43 @@ def update_db_status(article_id):
     conn.close()
 
 def main():
-    print("Fetching new articles from Neon DB...")
+    # Detect the day of the week
+    current_day = datetime.datetime.now().strftime('%A')
+    target_country = DAY_MAP.get(current_day)
+    
+    print(f"Today is {current_day}. Target ecosystem: {target_country}")
+    print(f"Querying Neon DB for the latest unposted update...")
+    
     try:
-        articles = get_articles_to_post()
+        article = get_daily_article(target_country)
     except Exception as e:
         print(f"Database Query Error: {e}")
-        print("Please verify your table column names match the script selection.")
         sys.exit(1)
-    
-    if not articles:
-        print("No new unposted articles found for any GCC country.")
+        
+    if not article:
+        print(f"No new unposted articles found for {target_country} today. Skipping execution.")
         return
 
-    print(f"Found {len(articles)} country updates to post.")
+    art_id, title, summary, source_url, country = article
+    print(f"Found article ID {art_id}: '{title}'")
     
-    # Scan and pick a model dynamically
     selected_model = get_best_available_model()
-
-    for art_id, title, summary, source_url, country in articles:
-        print(f"\n--- Processing: {country} ---")
-        print(f"Generating post copy via {selected_model}...")
-        try:
-            linkedin_text = generate_linkedin_content(selected_model, title, summary, country)
-        except Exception as e:
-            print(f"Gemini Generation Error for {country}: {e}")
-            continue
+    print(f"Generating post copy via {selected_model}...")
+    
+    try:
+        linkedin_text = generate_linkedin_content(selected_model, title, summary, country)
+    except Exception as e:
+        print(f"Gemini Generation Error: {e}")
+        sys.exit(1)
         
-        print(f"Publishing to LinkedIn page...")
-        success = post_to_linkedin(linkedin_text, source_url)
-        
-        if success:
-            update_db_status(art_id)
-            print(f"Success! Database updated for {country} article.")
-        else:
-            print(f"Skipping DB flag update due to LinkedIn API failure.")
+    print(f"Publishing to LinkedIn page using author handle: {LINKEDIN_ORG_ID}...")
+    success = post_to_linkedin(linkedin_text, source_url)
+    
+    if success:
+        update_db_status(art_id)
+        print(f"Success! Database updated. Post is live for {country}.")
+    else:
+        print(f"Execution stopped due to LinkedIn API rejection.")
 
 if __name__ == "__main__":
     main()
