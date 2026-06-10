@@ -74,7 +74,7 @@ def mark_article_posted(article_id: int):
 
 
 def generate_with_gemini(api_key: str, model_name: str, prompt: str) -> str:
-    """Executes an instant REST request with a tight timeout window and no sleep delays."""
+    """Executes an instant REST request with a fast timeout window."""
     url = (
         "https://generativelanguage.googleapis.com/v1beta/models/"
         f"{model_name}:generateContent?key={api_key}"
@@ -119,7 +119,7 @@ def generate_post_content(title: str, summary: str) -> str:
 
     if not active_keys:
         print("❌ Critical Error: No Gemini API keys found in runtime environment.")
-        sys.exit(1)
+        return ""
 
     for model in models:
         print(f"--- Sweeping Priority Tier Model: {model} ---")
@@ -133,17 +133,7 @@ def generate_post_content(title: str, summary: str) -> str:
                 print(f"⚠️ [{account_label}] failed for {model} ({e}). Moving to next key instantly.")
                 continue
 
-    print("❌ Critical Error: All configured keys and model tiers are fully exhausted.")
-    sys.exit(1)
-
-
-def get_title_fallback(post_text: str, country_name: str, flag: str) -> str:
-    """Builds a title using the first 2 lines of generated post text + country metrics."""
-    lines = [ln.strip() for ln in post_text.splitlines() if ln.strip()]
-    snippet = " ".join(lines[:2])
-    if len(snippet) > 80:
-        snippet = snippet[:77].rstrip() + "…"
-    return f"{flag} {snippet} | {country_name}"
+    return ""
 
 
 def main():
@@ -164,20 +154,29 @@ def main():
 
     # 3. Trigger prioritized Gemini generation sequence
     post_text = generate_post_content(db_title or summary or country_name, summary or "")
+    
+    # Safety fallback text block if all 3 Gemini API accounts are completely dead
+    if not post_text:
+        print("⚠️ Warning: Complete Gemini API lockout. Constructing fallback text.")
+        post_text = f"Check out the latest updates from the startup ecosystem in {country_name}! {flag}\n\n{summary or db_title or ''}"
 
-    # 4. Resolve clean Title Fallback matching parameters
-    if db_title and db_title.strip():
-        final_title = f"{flag} {db_title.strip()} | {country_name}"
-    else:
-        final_title = get_title_fallback(post_text, country_name, flag)
+    # 4. RULE FIX: Extract first 2 lines of post text + flag + country name for final title
+    lines = [ln.strip() for ln in post_text.splitlines() if ln.strip()]
+    title_snippet = " ".join(lines[:2]) if len(lines) >= 2 else (lines[0] if lines else (db_title or "Update"))
+    if len(title_snippet) > 80:
+        title_snippet = title_snippet[:77] + "…"
+    final_title = f"{flag} {title_snippet} | {country_name}"
     print(f"Resolved Title Payload: {final_title}")
 
-    # 5. Resolve absolute URL path for thumbnails safely
+    # 5. RULE FIX: If source URL is empty/missing, assign matching raw GitHub image
     fallback_thumb = f"{GITHUB_BASE}{country_data['code']}.jpg"
-    thumbnail_url = source_url if (source_url and source_url.startswith("http")) else fallback_thumb
+    if source_url and source_url.strip().startswith("http"):
+        thumbnail_url = source_url.strip()
+    else:
+        thumbnail_url = fallback_thumb
     print(f"Resolved Thumbnail URL Payload: {thumbnail_url}")
 
-    # 6. Post directly to Make.com Webhook
+    # 6. Post structured parameters directly to Make.com Webhook
     payload = {
         "text": post_text,
         "url": source_url or "",
