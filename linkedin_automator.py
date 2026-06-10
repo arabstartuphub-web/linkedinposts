@@ -51,7 +51,7 @@ def get_daily_article(country_name: str):
     # --- TEMPORARY TEST RULE FOR TODAY ---
     # If today is June 10, 2026, pull the newest available article regardless of country.
     current_utc_date = datetime.now(timezone.utc).date()
-    test_date = date(2026, 6, 10)
+    test_date = date(2026, 6, 1)
     
     if current_utc_date == test_date:
         print("⚠️ TODAY ONLY: Bypassing country filter to fetch the most recent unposted article for testing.")
