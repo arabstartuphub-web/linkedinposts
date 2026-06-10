@@ -97,9 +97,9 @@ def mark_article_posted(article_id: int):
 
 
 def generate_with_groq(prompt: str) -> str:
-    """Call Groq Cloud REST API using Llama 3.3 70B."""
+    """Call Groq Cloud REST API using Llama 3.3 70B with up to 3 retries for transient errors."""
     if not GROQ_API_KEY:
-        raise ValueError("GROQ_API_KEY is not configured in environment secrets.")
+        raise ValueError("GROQ_API_KEY is missing from environment.")
         
     url = "https://api.groq.com/openai/v1/chat/completions"
     headers = {
@@ -112,17 +112,29 @@ def generate_with_groq(prompt: str) -> str:
         "temperature": 0.7
     }
     
-    response = requests.post(url, json=payload, headers=headers, timeout=20)
-    if response.status_code == 200:
-        return response.json()["choices"][0]["message"]["content"].strip()
-    else:
-        raise RuntimeError(f"Groq API responded with status {response.status_code}: {response.text}")
+    for attempt in range(3):
+        try:
+            response = requests.post(url, json=payload, headers=headers, timeout=20)
+            if response.status_code == 200:
+                return response.json()["choices"][0]["message"]["content"].strip()
+            elif response.status_code in [429, 503]:
+                wait = 15 * (attempt + 1)
+                print(f"   [Groq Attempt {attempt + 1}/3] Server status {response.status_code}. Retrying in {wait}s...")
+                time.sleep(wait)
+            else:
+                raise RuntimeError(f"Groq API error {response.status_code}: {response.text}")
+        except requests.exceptions.RequestException as e:
+            wait = 15 * (attempt + 1)
+            print(f"   [Groq Attempt {attempt + 1}/3] Connection issue: {e}. Retrying in {wait}s...")
+            time.sleep(wait)
+            
+    raise RuntimeError("Groq completely exhausted all 3 retry attempts.")
 
 
 def generate_with_gemini(prompt: str) -> str:
-    """Call Gemini REST API using Gemini 2.0 Flash."""
+    """Call Gemini REST API using Gemini 2.0 Flash with up to 3 retries for transient errors."""
     if not GEMINI_API_KEY:
-        raise ValueError("GEMINI_API_KEY is not configured in environment secrets.")
+        raise ValueError("GEMINI_API_KEY is missing from environment.")
         
     url = (
         "https://generativelanguage.googleapis.com/v1beta/models/"
@@ -130,16 +142,28 @@ def generate_with_gemini(prompt: str) -> str:
     )
     payload = {"contents": [{"parts": [{"text": prompt}]}]}
     
-    response = requests.post(url, json=payload, timeout=20)
-    if response.status_code == 200:
-        data = response.json()
-        return data["candidates"][0]["content"]["parts"][0]["text"].strip()
-    else:
-        raise RuntimeError(f"Gemini API responded with status {response.status_code}: {response.text}")
+    for attempt in range(3):
+        try:
+            response = requests.post(url, json=payload, timeout=20)
+            if response.status_code == 200:
+                data = response.json()
+                return data["candidates"][0]["content"]["parts"][0]["text"].strip()
+            elif response.status_code in [429, 503]:
+                wait = 35 * (attempt + 1)
+                print(f"   [Gemini Attempt {attempt + 1}/3] Server status {response.status_code}. Retrying in {wait}s...")
+                time.sleep(wait)
+            else:
+                raise RuntimeError(f"Gemini API error {response.status_code}: {response.text}")
+        except requests.exceptions.RequestException as e:
+            wait = 35 * (attempt + 1)
+            print(f"   [Gemini Attempt {attempt + 1}/3] Connection issue: {e}. Retrying in {wait}s...")
+            time.sleep(wait)
+            
+    raise RuntimeError("Gemini completely exhausted all 3 retry attempts.")
 
 
 def generate_post_content(title: str, summary: str) -> str:
-    """Attempts generation via Groq first; cleanly cascades to Gemini on failure."""
+    """Smart Fallback Engine: Tries Groq 3 times, then falls back to Gemini for 3 times."""
     prompt = (
         f"Write a professional LinkedIn post for an Arab startup ecosystem audience.\n"
         f"Article title: {title}\n"
@@ -152,20 +176,20 @@ def generate_post_content(title: str, summary: str) -> str:
         f"- CRITICAL: Do NOT use markdown formatting. Never use asterisks (**) for bolding or emphasis. Output pure plain text only."
     )
 
-    # --- ATTEMPT 1: GROQ ---
-    print("🚀 Attempting content generation using Primary Model: Groq (Llama-3.3)...")
+    # --- PRIMARY SYSTEM: GROQ (3 ATTEMPTS EMPOWERED) ---
+    print("🚀 Running Primary Generation Engine: Groq (Llama-3.3)...")
     try:
         return generate_with_groq(prompt)
     except Exception as groq_error:
-        print(f"⚠️ Primary Model (Groq) failed: {groq_error}")
-        print("🔄 Gracefully routing to Secondary Fallback Model: Google Gemini...")
+        print(f"⚠️ Primary Engine (Groq) failed after full retry run: {groq_error}")
+        print("🔄 Activating Secondary Shield: Google Gemini (With 3-attempt safety loop)...")
         
-        # --- ATTEMPT 2: GEMINI FALLBACK ---
+        # --- SECONDARY SYSTEM: GEMINI FALLBACK (3 ATTEMPTS EMPOWERED) ---
         try:
             return generate_with_gemini(prompt)
         except Exception as gemini_error:
-            print(f"❌ Fallback Model (Gemini) also failed: {gemini_error}")
-            print("🚨 Critical: Both AI generation models are currently unreachable.")
+            print(f"❌ Fallback Engine (Gemini) also failed: {gemini_error}")
+            print("🚨 Critical: Both AI systems failed to produce a response.")
             sys.exit(1)
 
 
