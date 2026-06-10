@@ -1,8 +1,13 @@
 import os
 import sys
 import psycopg2
-from google import genai  # Modernized Google GenAI SDK
 import requests
+import warnings
+
+# Suppress the Google deprecation/FutureWarnings to keep your GitHub Action logs clean
+warnings.filterwarnings("ignore", category=FutureWarning)
+
+import google.generativeai as genai
 
 # 1. Load Environment Variables
 DB_URL = os.environ.get("DATABASE_URL")
@@ -14,13 +19,13 @@ if not all([DB_URL, GEMINI_API_KEY, LINKEDIN_ACCESS_TOKEN, LINKEDIN_ORG_ID]):
     print("Error: Missing one or more environment variables.")
     sys.exit(1)
 
-# Initialize the modern Gemini Client
-ai_client = genai.Client(api_key=GEMINI_API_KEY)
+# Configure Gemini
+genai.configure(api_key=GEMINI_API_KEY)
 
 def get_articles_to_post():
     """
     Fetches exactly ONE unposted article for EACH country.
-    Updated to match your exact Neon table schema column names.
+    Matches your exact Neon table schema column names.
     """
     query = """
         SELECT DISTINCT ON (country) id, title, summary, source_url, country 
@@ -38,6 +43,8 @@ def get_articles_to_post():
 
 def generate_linkedin_content(title, summary, country):
     """Uses Gemini 1.5 Flash to generate a snappy, readable LinkedIn post."""
+    model = genai.GenerativeModel('gemini-1.5-flash')
+    
     prompt = f"""
     You are the social media voice for 'Arabian Startups Ecosystem', a platform highlighting startup ecosystems in GCC countries.
     Draft an engaging, insightful LinkedIn post based on this recent news from {country}.
@@ -53,10 +60,7 @@ def generate_linkedin_content(title, summary, country):
     - End with a brief engaging question or line to spark discussion.
     """
     
-    response = ai_client.models.generate_content(
-        model='gemini-1.5-flash',
-        contents=prompt,
-    )
+    response = model.generate_content(prompt)
     return response.text
 
 def post_to_linkedin(text, article_url):
