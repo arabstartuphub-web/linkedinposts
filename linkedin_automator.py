@@ -3,7 +3,7 @@ import sys
 import time
 import requests
 import psycopg2
-from datetime import datetime, timezone
+from datetime import datetime, timezone, date
 
 # --- CONFIG ---
 DB_URL = os.environ.get("DATABASE_URL")
@@ -46,16 +46,36 @@ def get_daily_article(country_name: str):
     """Fetch one unposted article for the given country from Neon DB."""
     conn = psycopg2.connect(DB_URL)
     cur = conn.cursor()
-    cur.execute(
-        """
-        SELECT id, title, summary, source_url
-        FROM articles
-        WHERE linkedin_posted = FALSE AND country = %s
-        ORDER BY created_at ASC
-        LIMIT 1;
-        """,
-        (country_name,),
-    )
+    
+    # --- TEMPORARY TEST RULE FOR TODAY ---
+    # If today is June 10, 2026, pull the newest available article regardless of country.
+    current_utc_date = datetime.now(timezone.utc).date()
+    test_date = date(2026, 6, 10)
+    
+    if current_utc_date == test_date:
+        print("⚠️ TODAY ONLY: Bypassing country filter to fetch the most recent unposted article for testing.")
+        cur.execute(
+            """
+            SELECT id, title, summary, source_url
+            FROM articles
+            WHERE linkedin_posted = FALSE
+            ORDER BY created_at DESC
+            LIMIT 1;
+            """
+        )
+    else:
+        # --- PERMANENT AUTOMATION RULE (Resumes automatically tomorrow) ---
+        cur.execute(
+            """
+            SELECT id, title, summary, source_url
+            FROM articles
+            WHERE linkedin_posted = FALSE AND country = %s
+            ORDER BY created_at ASC
+            LIMIT 1;
+            """,
+            (country_name,),
+        )
+        
     row = cur.fetchone()
     cur.close()
     conn.close()
@@ -124,11 +144,11 @@ def main():
     country_name = get_country_for_today()
     country_data = COUNTRY_MAP.get(country_name, {"code": "GCC", "flag": "🌍"})
     flag = country_data["flag"]
-    print(f"Today's country: {country_name} {flag}")
+    print(f"Today's scheduled country: {country_name} {flag}")
 
     article = get_daily_article(country_name)
     if not article:
-        print(f"No unposted articles found for {country_name}. Exiting.")
+        print(f"No unposted articles found. Exiting.")
         sys.exit(0)
 
     article_id, db_title, summary, source_url = article
@@ -142,7 +162,7 @@ def main():
         final_title = get_title_fallback(post_text, country_name, flag)
     print(f"Final title: {final_title}")
 
-    # FIX: Always use the clean country graphic JPG file hosted on GitHub
+    # Always use the clean country graphic JPG file hosted on GitHub
     thumbnail_url = f"{GITHUB_BASE}{country_data['code']}.jpg"
     print(f"Target Graphic URL: {thumbnail_url}")
 
