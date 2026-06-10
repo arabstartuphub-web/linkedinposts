@@ -1,13 +1,12 @@
 import os
 import sys
 import requests
-import json
 import psycopg2
-import google.generativeai as genai
+import json
 
 # --- CONFIG ---
 DB_URL = os.environ.get("DATABASE_URL")
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
+API_KEY = os.environ.get("GEMINI_API_KEY") # Ensure this is your Google AI Studio API Key
 WEBHOOK_URL = os.environ.get("MAKE_WEBHOOK_URL")
 
 # GitHub raw URL base
@@ -32,9 +31,26 @@ def get_daily_article(country_name):
     conn.close()
     return article
 
+def generate_post_content(title):
+    """Direct REST API call to Gemini - No SDK required."""
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={API_KEY}"
+    payload = {
+        "contents": [{
+            "parts": [{"text": f"Write a professional LinkedIn post about: {title}. Include hashtags."}]
+        }]
+    }
+    response = requests.post(url, json=payload)
+    
+    if response.status_code == 200:
+        data = response.json()
+        return data['candidates'][0]['content']['parts'][0]['text']
+    else:
+        print(f"Gemini API Error: {response.text}")
+        sys.exit(1)
+
 def main():
     # 1. Setup country context
-    country_name = "Qatar" # Update as needed for your scheduler
+    country_name = "Qatar" 
     country_data = COUNTRY_MAP.get(country_name, {"code": "GCC", "flag": "🌍"})
     
     article = get_daily_article(country_name)
@@ -47,31 +63,15 @@ def main():
     # 2. Dynamic Title Formatting
     final_title = f"{country_data['flag']} {db_title} - {country_name}"
     
-    # 3. Direct GitHub Image Link (No downloading needed)
+    # 3. GitHub Image Path
     final_thumb = f"{GITHUB_BASE}{country_data['code']}.jpg"
     
-    # 4. Content Generation with Fallback
-    genai.configure(api_key=GEMINI_API_KEY)
+    # 4. Content Generation
+    post_text = generate_post_content(db_title)
     
-    models = ['models/gemini-1.5-flash', 'models/gemini-1.0-pro']
-    response = None
-    
-    for model_name in models:
-        try:
-            model = genai.GenerativeModel(model_name)
-            response = model.generate_content(f"Write a LinkedIn post about: {db_title}")
-            break
-        except Exception as e:
-            print(f"Model {model_name} failed, trying next... Error: {e}")
-            continue
-
-    if not response:
-        print("All models failed.")
-        sys.exit(1)
-    
-    # 5. Send to Webhook
+    # 5. Send to Make.com Webhook
     payload = {
-        "text": response.text,
+        "text": post_text,
         "url": source_url,
         "title": final_title,
         "thumbnail_url": final_thumb
@@ -79,7 +79,7 @@ def main():
     
     res = requests.post(WEBHOOK_URL, json=payload)
     if res.status_code in [200, 201]:
-        print("Success! Data sent to Make.")
+        print("Success! Data sent to Make.com.")
     else:
         print(f"Webhook failed with status {res.status_code}")
 
