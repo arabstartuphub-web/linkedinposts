@@ -3,7 +3,7 @@ import sys
 import time
 import requests
 import psycopg2
-from datetime import datetime, timezone
+from datetime import datetime, timezone, date
 
 # --- CONFIG ---
 DB_URL = os.environ.get("DATABASE_URL")
@@ -17,6 +17,12 @@ WEBHOOK_URL = os.environ.get("MAKE_WEBHOOK_URL")
 
 # GitHub raw URL base for country banner images
 GITHUB_BASE = "https://raw.githubusercontent.com/arabstartuphub-web/linkedinposts/main/"
+
+# ── TEST MODE ──────────────────────────────────────────────────────────────────
+# Set this to today's date when you want to test (bypasses country filter).
+# Set to None to run normally.
+TEST_DATE = None  # e.g. date(2026, 6, 11)
+# ──────────────────────────────────────────────────────────────────────────────
 
 # Maps country name → image code and flag emoji
 COUNTRY_MAP = {
@@ -49,16 +55,32 @@ def get_country_for_today() -> str:
 def get_daily_article(country_name: str):
     conn = psycopg2.connect(DB_URL)
     cur = conn.cursor()
-    cur.execute(
-        """
-        SELECT id, title, summary, source_url
-        FROM articles
-        WHERE linkedin_posted = FALSE AND country = %s
-        ORDER BY created_at ASC
-        LIMIT 1;
-        """,
-        (country_name,),
-    )
+
+    current_utc_date = datetime.now(timezone.utc).date()
+
+    if TEST_DATE and current_utc_date == TEST_DATE:
+        print(f"⚠️  TEST MODE ON ({TEST_DATE}): Fetching most recent unposted article regardless of country.")
+        cur.execute(
+            """
+            SELECT id, title, summary, source_url
+            FROM articles
+            WHERE linkedin_posted = FALSE
+            ORDER BY created_at DESC
+            LIMIT 1;
+            """
+        )
+    else:
+        cur.execute(
+            """
+            SELECT id, title, summary, source_url
+            FROM articles
+            WHERE linkedin_posted = FALSE AND country = %s
+            ORDER BY created_at ASC
+            LIMIT 1;
+            """,
+            (country_name,),
+        )
+
     row = cur.fetchone()
     cur.close()
     conn.close()
@@ -131,7 +153,7 @@ def generate_with_gemini(prompt: str) -> str:
                     return response.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
                 elif response.status_code == 429:
                     print(f"   [Gemini Key {key_index + 1}] Rate limited. Trying next key...")
-                    break  # try next key immediately
+                    break
                 elif response.status_code == 503:
                     wait = 35 * (attempt + 1)
                     print(f"   [Gemini Key {key_index + 1} Attempt {attempt + 1}/3] Status 503. Retrying in {wait}s...")
@@ -163,7 +185,7 @@ def generate_post_content(title: str, summary: str) -> str:
     try:
         return generate_with_groq(prompt)
     except Exception as groq_error:
-        print(f"⚠️ Groq failed: {groq_error}")
+        print(f"⚠️  Groq failed: {groq_error}")
         print("🔄 Fallback: Google Gemini...")
         try:
             return generate_with_gemini(prompt)
@@ -203,18 +225,18 @@ def main():
     else:
         final_title = get_title_fallback(post_text, country_name, flag)
 
-    # Build the GitHub banner URL
+    # Always the GitHub banner — never the article URL
     thumbnail_url = f"{GITHUB_BASE}{image_code}.jpg"
 
-    # ── DEBUG: verify all payload values before sending ──
+    # ── DEBUG LOG ──────────────────────────────────────────────────────────────
     print("=" * 50)
     print(f"DEBUG country_name  : {country_name}")
     print(f"DEBUG image_code    : {image_code}")
-    print(f"DEBUG final_title   : {final_title}")
     print(f"DEBUG source_url    : {source_url}")
     print(f"DEBUG thumbnail_url : {thumbnail_url}")
-    print(f"DEBUG post_text[:80]: {post_text[:80]}")
+    print(f"DEBUG final_title   : {final_title}")
     print("=" * 50)
+    # ──────────────────────────────────────────────────────────────────────────
 
     payload = {
         "text":          post_text,
