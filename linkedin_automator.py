@@ -4,6 +4,7 @@ import datetime
 import psycopg2
 import requests
 import warnings
+import re
 
 # Suppress Google deprecation/FutureWarnings to keep your GitHub Action execution logs clean
 warnings.filterwarnings("ignore", category=FutureWarning)
@@ -50,6 +51,24 @@ def get_daily_article(country_name):
     conn.close()
     return article
 
+def extract_og_image(url):
+    """Attempts to fetch the page HTML and parse the og:image meta tag for the thumbnail card."""
+    try:
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/110.0.0.0 Safari/537.36"
+        }
+        res = requests.get(url, headers=headers, timeout=5)
+        if res.status_code == 200:
+            html = res.text
+            match = re.search(r'<meta\s+[^>]*property=["\']og:image["\'][^>]*content=["\']([^"\']+)["\']', html, re.IGNORECASE)
+            if not match:
+                match = re.search(r'<meta\s+[^>]*content=["\']([^"\']+)["\'][^>]*property=["\']og:image["\']', html, re.IGNORECASE)
+            if match:
+                return match.group(1)
+    except Exception as e:
+        print(f"Warning: Could not scrape thumbnail image from target URL: {e}")
+    return None
+
 def generate_linkedin_content(model_name, title, summary, country):
     """Uses Gemini to generate structured LinkedIn post text."""
     model = genai.GenerativeModel(model_name)
@@ -72,11 +91,13 @@ def generate_linkedin_content(model_name, title, summary, country):
     response = model.generate_content(prompt)
     return response.text
 
-def post_to_linkedin_via_webhook(text, article_url):
-    """Routes the generated content to your Make.com bridge to publish on your company page."""
+def post_to_linkedin_via_webhook(text, article_url, title, thumbnail_url):
+    """Routes the generated content and metadata to your Make.com bridge."""
     payload = {
         "text": text,
-        "url": article_url
+        "url": article_url,
+        "title": title,
+        "thumbnail_url": thumbnail_url
     }
     
     try:
@@ -120,6 +141,16 @@ def main():
     art_id, title, summary, source_url, country = article
     print(f"Found article ID {art_id}: '{title}'")
     
+    print(f"Scraping source link for Open Graph thumbnail preview...")
+    scraped_thumb = extract_og_image(source_url)
+    if scraped_thumb:
+        thumbnail_url = scraped_thumb
+        print(f"Found thumbnail URL: {thumbnail_url}")
+    else:
+        # High-quality workspace placeholder image to ensure Make.com always has a valid file fallback to parse
+        thumbnail_url = "https://images.unsplash.com/photo-1522071820081-009f0129c71c?auto=format&fit=crop&w=1200&h=627&q=80"
+        print(f"No dynamic thumbnail found. Using fallback placeholder: {thumbnail_url}")
+    
     # Modern model fallback array to absorb quota exhaustions seamlessly
     models_to_try = ['gemini-2.5-flash', 'gemini-3.5-flash', 'gemini-3.1-flash-lite', 'gemini-2.0-flash']
     linkedin_text = None
@@ -143,8 +174,8 @@ def main():
         print("Error: All fallback Gemini models exhausted or rate-limited for today.")
         sys.exit(1)
         
-    print(f"Routing generated content to Make.com Webhook...")
-    success = post_to_linkedin_via_webhook(linkedin_text, source_url)
+    print(f"Routing generated content and scraped layout to Make.com Webhook...")
+    success = post_to_linkedin_via_webhook(linkedin_text, source_url, title, thumbnail_url)
     
     if success:
         update_db_status(art_id)
