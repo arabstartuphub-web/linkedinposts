@@ -24,13 +24,13 @@ COUNTRY_MAP = {
 
 # Maps Python weekday (Mon=0 … Sun=6) → country to post
 WEEKDAY_COUNTRY = {
-    0: "Saudi Arabia",  # Monday
-    1: "UAE",           # Tuesday
-    2: "Qatar",         # Wednesday
-    3: "Kuwait",        # Thursday
-    4: "Oman",          # Friday
-    5: "Bahrain",       # Saturday
-    6: "GCC",           # Sunday
+    0: "Saudi Arabia",
+    1: "UAE",
+    2: "Qatar",
+    3: "Kuwait",
+    4: "Oman",
+    5: "Bahrain",
+    6: "GCC",
 }
 
 
@@ -74,14 +74,11 @@ def mark_article_posted(article_id: int):
 
 
 def generate_with_gemini(api_key: str, model_name: str, prompt: str) -> str:
-    """Executes an instant REST request with a fast timeout window."""
-    url = (
-        "https://generativelanguage.googleapis.com/v1beta/models/"
-        f"{model_name}:generateContent?key={api_key}"
-    )
+    """Executes a REST request with a tight timeout to keep execution fast."""
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key}"
     payload = {"contents": [{"parts": [{"text": prompt}]}]}
     
-    # 10 second timeout ensures GitHub Action skips bad/exhausted endpoints instantly
+    # 10-second timeout allows swift rotation across exhausted keys
     response = requests.post(url, json=payload, timeout=10)
     
     if response.status_code == 200:
@@ -94,15 +91,15 @@ def generate_with_gemini(api_key: str, model_name: str, prompt: str) -> str:
 def generate_post_content(title: str, summary: str) -> str:
     """
     Priority Matrix Architecture:
-    Tier 1: Try gemini-3.5-flash across Account 1 -> Account 2 -> Account 3 sequentially.
-    Tier 2: Only if all Tier 1 keys fail, try gemini-3.1-flash-lite across Account 1 -> Account 2 -> Account 3.
+    Tier 1: Try gemini-3.5-flash sequentially across Account 1 -> Account 2 -> Account 3.
+    Tier 2: If all Tier 1 keys fail/exhaust tokens, try gemini-3.1-flash-lite across all 3 accounts.
     """
     prompt = (
         f"Write a professional LinkedIn post for an Arab startup ecosystem audience.\n"
         f"Article title: {title}\n"
         f"Summary: {summary}\n\n"
         f"Requirements:\n"
-        f"- Start with a compelling hook (no generic openers like 'Exciting news')\n"
+        f"- Start with a compelling hook\n"
         f"- 3-5 short paragraphs\n"
         f"- End with 4-6 relevant hashtags\n"
         f"- Tone: insightful, professional, engaging"
@@ -118,19 +115,18 @@ def generate_post_content(title: str, summary: str) -> str:
     active_keys = [k for k in gemini_keys if k]
 
     if not active_keys:
-        print("❌ Critical Error: No Gemini API keys found in runtime environment.")
+        print("❌ Critical Error: No Gemini API keys provided in environment.")
         return ""
 
     for model in models:
-        print(f"--- Sweeping Priority Tier Model: {model} ---")
+        print(f"--- Scanning Priority Matrix for Model: {model} ---")
         for idx, key in enumerate(active_keys):
             account_label = "Primary" if idx == 0 else f"Backup {idx}"
-            print(f"Requesting generation via {model} on {account_label} Account...")
-            
+            print(f"Requesting content from {model} via {account_label} Account...")
             try:
                 return generate_with_gemini(key, model, prompt)
             except Exception as e:
-                print(f"⚠️ [{account_label}] failed for {model} ({e}). Moving to next key instantly.")
+                print(f"⚠️ {account_label} failed for {model} ({e}). Moving to next key instantly.")
                 continue
 
     return ""
@@ -141,40 +137,40 @@ def main():
     country_name = get_country_for_today()
     country_data = COUNTRY_MAP.get(country_name, {"code": "GCC", "flag": "🌍"})
     flag = country_data["flag"]
-    print(f"Today's localized target: {country_name} {flag}")
+    print(f"Targeting Location: {country_name} {flag}")
 
     # 2. Extract article source asset
     article = get_daily_article(country_name)
     if not article:
-        print(f"No unposted entries available for {country_name}. Shutting down execution.")
+        print(f"No unposted entries available for {country_name}. Exiting.")
         sys.exit(0)
 
     article_id, db_title, summary, source_url = article
-    print(f"Processing database item ID {article_id}: {db_title or '(Blank Title)'}")
+    print(f"Processing Database Item ID {article_id}: {db_title or '(Blank Title)'}")
 
     # 3. Trigger prioritized Gemini generation sequence
     post_text = generate_post_content(db_title or summary or country_name, summary or "")
     
-    # Safety fallback text block if all 3 Gemini API accounts are completely dead
+    # Complete lockout backup safety net (ensures payload is never empty)
     if not post_text:
-        print("⚠️ Warning: Complete Gemini API lockout. Constructing fallback text.")
+        print("⚠️ Warning: Complete API lockout. Constructing automated text baseline.")
         post_text = f"Check out the latest updates from the startup ecosystem in {country_name}! {flag}\n\n{summary or db_title or ''}"
 
-    # 4. RULE FIX: Extract first 2 lines of post text + flag + country name for final title
+    # 4. RULE FIX: Extract first 2 lines of post text + country name + flag emoji
     lines = [ln.strip() for ln in post_text.splitlines() if ln.strip()]
     title_snippet = " ".join(lines[:2]) if len(lines) >= 2 else (lines[0] if lines else (db_title or "Update"))
-    if len(title_snippet) > 80:
-        title_snippet = title_snippet[:77] + "…"
+    if len(title_snippet) > 85:
+        title_snippet = title_snippet[:82] + "…"
     final_title = f"{flag} {title_snippet} | {country_name}"
-    print(f"Resolved Title Payload: {final_title}")
+    print(f"Generated Title Payload: {final_title}")
 
-    # 5. RULE FIX: If source URL is empty/missing, assign matching raw GitHub image
+    # 5. RULE FIX: Fallback to GitHub image path if source_url is blank or broken
     fallback_thumb = f"{GITHUB_BASE}{country_data['code']}.jpg"
     if source_url and source_url.strip().startswith("http"):
         thumbnail_url = source_url.strip()
     else:
         thumbnail_url = fallback_thumb
-    print(f"Resolved Thumbnail URL Payload: {thumbnail_url}")
+    print(f"Generated Thumbnail URL Payload: {thumbnail_url}")
 
     # 6. Post structured parameters directly to Make.com Webhook
     payload = {
@@ -186,15 +182,15 @@ def main():
         "flag": flag,
     }
 
-    print("Forwarding payload package down to Make.com...")
+    print("Transmitting structured payload package to Make.com...")
     res = requests.post(WEBHOOK_URL, json=payload, timeout=20)
 
     if res.status_code in [200, 201, 204]:
-        print("✅ Transmission successfully acknowledged by Make.com module.")
+        print("✅ Transmission successfully acknowledged by Make.com.")
         mark_article_posted(article_id)
-        print(f"✅ DB Update Verified: Article ID {article_id} locked down.")
+        print(f"✅ DB Update Verified: Article ID {article_id} marked posted.")
     else:
-        print(f"❌ Target terminal error — Code {res.status_code}: {res.text}")
+        print(f"❌ Webhook target error — Code {res.status_code}: {res.text}")
         sys.exit(1)
 
 
