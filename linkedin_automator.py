@@ -201,7 +201,43 @@ def get_title_fallback(post_text: str, country_name: str, flag: str) -> str:
     if len(snippet) > 80:
         snippet = snippet[:77].rstrip() + "…"
     return f"{flag} {snippet} | {country_name}"
+    
+NEWS_API_KEY = os.environ.get("NEWS_API_KEY")
 
+def fetch_live_article(country_name: str):
+    """Fetch a fresh article from NewsAPI when DB is empty for today's country."""
+    query_map = {
+        "Saudi Arabia": "Saudi Arabia startup OR economy OR business",
+        "UAE":          "UAE startup OR economy OR business",
+        "Qatar":        "Qatar startup OR economy OR business",
+        "Kuwait":       "Kuwait startup OR economy OR business",
+        "Oman":         "Oman startup OR economy OR business",
+        "Bahrain":      "Bahrain startup OR economy OR business",
+        "GCC":          "GCC startup OR economy OR business",
+    }
+    query = query_map.get(country_name, "Arab startup ecosystem")
+    url = (
+        f"https://newsapi.org/v2/everything"
+        f"?q={requests.utils.quote(query)}"
+        f"&language=en"
+        f"&sortBy=publishedAt"
+        f"&pageSize=1"
+        f"&apiKey={NEWS_API_KEY}"
+    )
+    try:
+        res = requests.get(url, timeout=15)
+        if res.status_code == 200:
+            articles = res.json().get("articles", [])
+            if articles:
+                a = articles[0]
+                title = a.get("title", "")
+                summary = a.get("description", "") or a.get("content", "")
+                source_url = a.get("url", "")
+                print(f"✅ Live article fetched: {title}")
+                return title, summary, source_url
+    except Exception as e:
+        print(f"NewsAPI error: {e}")
+    return None, None, None
 
 def main():
     country_name = get_country_for_today()
@@ -209,12 +245,18 @@ def main():
     flag = country_data["flag"]
     print(f"Today's scheduled country: {country_name} {flag}")
 
+   # REPLACE WITH:
     article = get_daily_article(country_name)
-    if not article:
-        print(f"No unposted articles found. Exiting.")
-        sys.exit(0)
 
-    article_id, db_title, summary, source_url = article
+    if not article:
+        print(f"No unposted articles in DB for {country_name}. Fetching live from NewsAPI...")
+        article_id = None
+        db_title, summary, source_url = fetch_live_article(country_name)
+    if not db_title:
+        print("NewsAPI also returned nothing. Exiting.")
+        sys.exit(0)
+    else:
+        article_id, db_title, summary, source_url = article
     print(f"Article ID {article_id}: {db_title or '(no title)'}")
 
     post_text = generate_post_content(db_title or summary or country_name, summary or "")
@@ -243,7 +285,8 @@ def main():
 
     if res.status_code in [200, 201, 204]:
         print("✅ Successfully sent to Make.com.")
-        mark_article_posted(article_id)
+        if article_id:
+            mark_article_posted(article_id)
     else:
         print(f"❌ Webhook failed — status {res.status_code}: {res.text}")
         sys.exit(1)
