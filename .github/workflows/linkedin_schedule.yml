@@ -2,12 +2,12 @@ name: Scheduled LinkedIn Automation
 
 on:
   schedule:
-    # Sun, Mon, Wed, Thu, Sat at 10:00 AM AST (07:00 UTC)  → GCC, KSA, Qatar, Kuwait, Bahrain
+    # Sun, Mon, Wed, Thu, Sat at 10:00 AM AST (07:00 UTC)
     - cron: '0 7 * * 0,1,3,4,6'
-    # Tue, Fri at 10:00 AM GST (06:00 UTC) → UAE, Oman
+    # Tue, Fri at 10:00 AM GST (06:00 UTC)
     - cron: '0 6 * * 2,5'
 
-  workflow_dispatch: # Manual trigger from the Actions UI
+  workflow_dispatch:
 
 jobs:
   run-automation:
