@@ -1,6 +1,5 @@
 import os
 import sys
-import time
 import requests
 import psycopg2
 from datetime import datetime, timezone
@@ -37,15 +36,12 @@ WEEKDAY_COUNTRY = {
 
 def get_country_for_today() -> str:
     """Return the country name to post about today based on UTC weekday."""
-    weekday = datetime.now(timezone.utc).weekday()  # Mon=0 … Sun=6
+    weekday = datetime.now(timezone.utc).weekday()
     return WEEKDAY_COUNTRY.get(weekday, "GCC")
 
 
 def get_daily_article(country_name: str):
-    """
-    Fetch one unposted article for the given country from Neon DB.
-    Returns (id, title, summary, source_url) or None.
-    """
+    """Fetch one unposted article for the given country from Neon DB."""
     conn = psycopg2.connect(DB_URL)
     cur = conn.cursor()
     cur.execute(
@@ -61,7 +57,7 @@ def get_daily_article(country_name: str):
     row = cur.fetchone()
     cur.close()
     conn.close()
-    return row  # (id, title, summary, source_url) or None
+    return row
 
 
 def mark_article_posted(article_id: int):
@@ -77,26 +73,31 @@ def mark_article_posted(article_id: int):
     conn.close()
 
 
-def generate_with_gemini(api_key: str, prompt: str) -> str:
-    """Executes the specific API REST post request for a single key."""
+def generate_with_gemini(api_key: str, model_name: str, prompt: str) -> str:
+    """Executes an instant REST request with a tight timeout window."""
     url = (
         "https://generativelanguage.googleapis.com/v1beta/models/"
-        f"gemini-2.0-flash-lite:generateContent?key={api_key}"
+        f"{model_name}:generateContent?key={api_key}"
     )
     payload = {"contents": [{"parts": [{"text": prompt}]}]}
-    response = requests.post(url, json=payload, timeout=30)
+    
+    # 10 second timeout ensures GitHub Action never hangs on bad or dead endpoints
+    response = requests.post(url, json=payload, timeout=10)
     
     if response.status_code == 200:
         data = response.json()
         return data["candidates"][0]["content"]["parts"][0]["text"].strip()
-    elif response.status_code == 429:
-        raise RuntimeWarning("429 Rate Limit Hit")
     else:
-        raise RuntimeError(f"API Error {response.status_code}: {response.text}")
+        raise RuntimeError(f"Status {response.status_code}")
 
 
 def generate_post_content(title: str, summary: str) -> str:
-    """Loops sequentially through available Gemini accounts to generate content."""
+    """
+    Priority Matrix Strategy:
+    Tier 1: Try gemini-3.5-flash across Account 1 -> Account 2 -> Account 3.
+    Tier 2: Try gemini-3.1-flash-lite across Account 1 -> Account 2 -> Account 3.
+    Fails over instantly without using time.sleep() delays.
+    """
     prompt = (
         f"Write a professional LinkedIn post for an Arab startup ecosystem audience.\n"
         f"Article title: {title}\n"
@@ -108,44 +109,41 @@ def generate_post_content(title: str, summary: str) -> str:
         f"- Tone: insightful, professional, engaging"
     )
 
-    # Compile keys in priority order
+    # Model hierarchy selection
+    models = ["gemini-3.5-flash", "gemini-3.1-flash-lite"]
+
+    # Account token layout
     gemini_keys = [
         os.environ.get("GEMINI_API_KEY"),
         os.environ.get("GEMINI_API_KEY_BACKUP1"),
         os.environ.get("GEMINI_API_KEY_BACKUP2")
     ]
-    # Filter out empty or unassigned keys
     active_keys = [k for k in gemini_keys if k]
 
     if not active_keys:
-        print("❌ Critical Error: No Gemini API keys found in runtime environment.")
+        print("❌ Critical Error: No Gemini API keys found in environment variables.")
         sys.exit(1)
 
-    # Sequence execution through keys
-    for idx, key in enumerate(active_keys):
-        account_label = "Primary" if idx == 0 else f"Backup {idx}"
-        print(f"Attempting post generation with Gemini {account_label} Account...")
-        
-        for attempt in range(2):
+    # Sequence Strategy Loop
+    for model in models:
+        print(f"--- Evaluative Priority Tier: {model} ---")
+        for idx, key in enumerate(active_keys):
+            account_label = "Primary" if idx == 0 else f"Backup {idx}"
+            print(f"Sending prompt to {model} via {account_label} Account...")
+            
             try:
-                return generate_with_gemini(key, prompt)
-            except RuntimeWarning:
-                wait = 20 * (attempt + 1)
-                print(f"[{account_label}] Rate limited (429). Waiting {wait}s before retry...")
-                time.sleep(wait)
+                return generate_with_gemini(key, model, prompt)
             except Exception as e:
-                print(f"[{account_label}] Failed with error: {e}. Moving to next account structure.")
-                break  # Break inner retry loop to immediately swap to next backup key
+                # Catch failures and instantly jump to the next account variant
+                print(f"⚠️ [{account_label}] failed using {model} ({e}). Advancing instantly...")
+                continue
 
-    print("❌ Critical Error: All configured Gemini accounts have exhausted their limits or failed.")
+    print("❌ Critical Error: All accounts and model tiers are fully exhausted for today.")
     sys.exit(1)
 
 
 def get_title_fallback(post_text: str, country_name: str, flag: str) -> str:
-    """
-    Build a title from the first 2 lines of the generated post
-    + country name + flag, used when the DB title is empty.
-    """
+    """Build a title from the first 2 lines of the generated post text."""
     lines = [ln.strip() for ln in post_text.splitlines() if ln.strip()]
     snippet = " ".join(lines[:2])
     if len(snippet) > 80:
@@ -154,38 +152,36 @@ def get_title_fallback(post_text: str, country_name: str, flag: str) -> str:
 
 
 def main():
-    # 1. Determine which country to post about today
+    # 1. Select targeted country segment
     country_name = get_country_for_today()
     country_data = COUNTRY_MAP.get(country_name, {"code": "GCC", "flag": "🌍"})
     flag = country_data["flag"]
-    print(f"Today's country: {country_name} {flag}")
+    print(f"Today's country segment: {country_name} {flag}")
 
-    # 2. Fetch article from DB
+    # 2. Extract context asset from Neon DB
     article = get_daily_article(country_name)
     if not article:
-        print(f"No unposted articles found for {country_name}. Exiting.")
+        print(f"No unposted articles found for {country_name}. Script shutdown.")
         sys.exit(0)
 
     article_id, db_title, summary, source_url = article
-    print(f"Article ID {article_id}: {db_title or '(no title)'}")
+    print(f"Processing Article ID {article_id}: {db_title or '(No Title Available)'}")
 
-    # 3. Generate LinkedIn post content via Gemini rotating array
+    # 3. Request multi-tier post content generation
     post_text = generate_post_content(db_title or summary or country_name, summary or "")
 
-    # 4. Resolve final title fallback logic
+    # 4. Resolve explicit title processing constraints
     if db_title and db_title.strip():
         final_title = f"{flag} {db_title.strip()} | {country_name}"
     else:
         final_title = get_title_fallback(post_text, country_name, flag)
-    print(f"Final title: {final_title}")
+    print(f"Resolved Final Title: {final_title}")
 
-    # 5. Resolve thumbnail links safely
+    # 5. Extract fallback routing urls
     fallback_thumb = f"{GITHUB_BASE}{country_data['code']}.jpg"
     thumbnail_url = source_url if (source_url and source_url.startswith("http")) else fallback_thumb
-    print(f"Thumbnail URL: {thumbnail_url}")
-    print(f"Fallback thumbnail: {fallback_thumb}")
 
-    # 6. Send to Make.com webhook payload package
+    # 6. Dispatch parameters downstream to Make.com
     payload = {
         "text": post_text,
         "url": source_url or "",
@@ -196,15 +192,15 @@ def main():
         "flag": flag,
     }
 
-    print("Sending to Make.com webhook…")
-    res = requests.post(WEBHOOK_URL, json=payload, timeout=30)
+    print("Forwarding parameters to Make.com Webhook...")
+    res = requests.post(WEBHOOK_URL, json=payload, timeout=20)
 
     if res.status_code in [200, 201, 204]:
-        print("✅ Successfully sent to Make.com.")
+        print("✅ Delivery acknowledged by Make.com.")
         mark_article_posted(article_id)
-        print(f"✅ Article ID {article_id} marked as posted.")
+        print(f"✅ DB Update Complete: Article ID {article_id} marked posted.")
     else:
-        print(f"❌ Webhook failed — status {res.status_code}: {res.text}")
+        print(f"❌ Automation pipeline terminal error — Code {res.status_code}: {res.text}")
         sys.exit(1)
 
 
