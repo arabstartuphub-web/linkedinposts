@@ -8,6 +8,7 @@ from datetime import datetime, timezone, date
 # --- CONFIG ---
 DB_URL = os.environ.get("DATABASE_URL")
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 WEBHOOK_URL = os.environ.get("MAKE_WEBHOOK_URL")
 
 # GitHub raw URL base for fallback images
@@ -95,14 +96,50 @@ def mark_article_posted(article_id: int):
     conn.close()
 
 
-def generate_post_content(title: str, summary: str) -> str:
-    """Call Groq Cloud REST API to generate a LinkedIn post using Llama 3.3 70B."""
+def generate_with_groq(prompt: str) -> str:
+    """Call Groq Cloud REST API using Llama 3.3 70B."""
+    if not GROQ_API_KEY:
+        raise ValueError("GROQ_API_KEY is not configured in environment secrets.")
+        
     url = "https://api.groq.com/openai/v1/chat/completions"
     headers = {
         "Authorization": f"Bearer {GROQ_API_KEY}",
         "Content-Type": "application/json"
     }
+    payload = {
+        "model": "llama-3.3-70b-versatile",
+        "messages": [{"role": "user", "content": prompt}],
+        "temperature": 0.7
+    }
     
+    response = requests.post(url, json=payload, headers=headers, timeout=20)
+    if response.status_code == 200:
+        return response.json()["choices"][0]["message"]["content"].strip()
+    else:
+        raise RuntimeError(f"Groq API responded with status {response.status_code}: {response.text}")
+
+
+def generate_with_gemini(prompt: str) -> str:
+    """Call Gemini REST API using Gemini 2.0 Flash."""
+    if not GEMINI_API_KEY:
+        raise ValueError("GEMINI_API_KEY is not configured in environment secrets.")
+        
+    url = (
+        "https://generativelanguage.googleapis.com/v1beta/models/"
+        f"gemini-2.0-flash:generateContent?key={GEMINI_API_KEY}"
+    )
+    payload = {"contents": [{"parts": [{"text": prompt}]}]}
+    
+    response = requests.post(url, json=payload, timeout=20)
+    if response.status_code == 200:
+        data = response.json()
+        return data["candidates"][0]["content"]["parts"][0]["text"].strip()
+    else:
+        raise RuntimeError(f"Gemini API responded with status {response.status_code}: {response.text}")
+
+
+def generate_post_content(title: str, summary: str) -> str:
+    """Attempts generation via Groq first; cleanly cascades to Gemini on failure."""
     prompt = (
         f"Write a professional LinkedIn post for an Arab startup ecosystem audience.\n"
         f"Article title: {title}\n"
@@ -114,28 +151,22 @@ def generate_post_content(title: str, summary: str) -> str:
         f"- Tone: insightful, professional, engaging\n"
         f"- CRITICAL: Do NOT use markdown formatting. Never use asterisks (**) for bolding or emphasis. Output pure plain text only."
     )
-    
-    payload = {
-        "model": "llama-3.3-70b-versatile",
-        "messages": [{"role": "user", "content": prompt}],
-        "temperature": 0.7
-    }
 
-    for attempt in range(3):
-        response = requests.post(url, json=payload, headers=headers, timeout=30)
-        if response.status_code == 200:
-            data = response.json()
-            return data["choices"][0]["message"]["content"].strip()
-        elif response.status_code == 429:
-            wait = 15 * (attempt + 1)
-            print(f"Groq Rate limited (429). Waiting {wait}s before retry {attempt + 1}/3…")
-            time.sleep(wait)
-        else:
-            print(f"Groq API Error {response.status_code}: {response.text}")
+    # --- ATTEMPT 1: GROQ ---
+    print("🚀 Attempting content generation using Primary Model: Groq (Llama-3.3)...")
+    try:
+        return generate_with_groq(prompt)
+    except Exception as groq_error:
+        print(f"⚠️ Primary Model (Groq) failed: {groq_error}")
+        print("🔄 Gracefully routing to Secondary Fallback Model: Google Gemini...")
+        
+        # --- ATTEMPT 2: GEMINI FALLBACK ---
+        try:
+            return generate_with_gemini(prompt)
+        except Exception as gemini_error:
+            print(f"❌ Fallback Model (Gemini) also failed: {gemini_error}")
+            print("🚨 Critical: Both AI generation models are currently unreachable.")
             sys.exit(1)
-
-    print("Groq API still rate-limited after 3 retries. Check limits.")
-    sys.exit(1)
 
 
 def get_title_fallback(post_text: str, country_name: str, flag: str) -> str:
@@ -148,10 +179,6 @@ def get_title_fallback(post_text: str, country_name: str, flag: str) -> str:
 
 
 def main():
-    if not GROQ_API_KEY:
-        print("❌ Error: GROQ_API_KEY environment variable is missing.")
-        sys.exit(1)
-
     country_name = get_country_for_today()
     country_data = COUNTRY_MAP.get(country_name, {"code": "GCC", "flag": "🌍"})
     flag = country_data["flag"]
@@ -165,7 +192,6 @@ def main():
     article_id, db_title, summary, source_url = article
     print(f"Article ID {article_id}: {db_title or '(no title)'}")
 
-    print("Generating post with Groq (Llama-3.3)...")
     post_text = generate_post_content(db_title or summary or country_name, summary or "")
 
     if db_title and db_title.strip():
