@@ -21,7 +21,7 @@ GITHUB_BASE = "https://raw.githubusercontent.com/arabstartuphub-web/linkedinpost
 # ── TEST MODE ──────────────────────────────────────────────────────────────────
 # Set this to today's date when you want to test (bypasses country filter).
 # Set to None to run normally.
-TEST_DATE = None  # e.g. date(2026, 6, 11)
+TEST_DATE = date(2026, 6, 11)  # e.g. date(2026, 6, 11)
 # ──────────────────────────────────────────────────────────────────────────────
 
 # Maps country name → image code and flag emoji
