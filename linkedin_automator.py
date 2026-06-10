@@ -1,7 +1,7 @@
 import os
 import sys
 import psycopg2
-import google.generativeai as genai
+from google import genai  # Modernized Google GenAI SDK
 import requests
 
 # 1. Load Environment Variables
@@ -10,21 +10,20 @@ GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 LINKEDIN_ACCESS_TOKEN = os.environ.get("LINKEDIN_ACCESS_TOKEN")
 LINKEDIN_ORG_ID = os.environ.get("LINKEDIN_ORG_ID")
 
-# Quick safety check to prevent running without configuration
 if not all([DB_URL, GEMINI_API_KEY, LINKEDIN_ACCESS_TOKEN, LINKEDIN_ORG_ID]):
     print("Error: Missing one or more environment variables.")
     sys.exit(1)
 
-# Configure Gemini
-genai.configure(api_key=GEMINI_API_KEY)
+# Initialize the modern Gemini Client
+ai_client = genai.Client(api_key=GEMINI_API_KEY)
 
 def get_articles_to_post():
     """
     Fetches exactly ONE unposted article for EACH country.
-    Uses Postgres DISTINCT ON to guarantee country uniqueness in the batch.
+    Updated to match your exact Neon table schema column names.
     """
     query = """
-        SELECT DISTINCT ON (country) id, title, content, url, country 
+        SELECT DISTINCT ON (country) id, title, summary, source_url, country 
         FROM articles 
         WHERE linkedin_posted = FALSE 
         ORDER BY country, created_at DESC;
@@ -37,26 +36,27 @@ def get_articles_to_post():
     conn.close()
     return articles
 
-def generate_linkedin_content(title, content, country):
+def generate_linkedin_content(title, summary, country):
     """Uses Gemini 1.5 Flash to generate a snappy, readable LinkedIn post."""
-    model = genai.GenerativeModel('gemini-1.5-flash')
-    
     prompt = f"""
     You are the social media voice for 'Arabian Startups Ecosystem', a platform highlighting startup ecosystems in GCC countries.
     Draft an engaging, insightful LinkedIn post based on this recent news from {country}.
     
     Title: {title}
-    Context/Content: {content}
+    Context/Summary: {summary}
     
     Guidelines:
     - Keep it crisp and punchy (use clean line breaks for scannability).
     - Summarize the key impact or takeaway.
     - Include 2-3 relevant hashtags (e.g., #{country}Startups, #GCCStartups).
-    - Do not use placeholders like '[Insert Link Here]'. Focus entirely on the hook and summary.
+    - Do not use placeholders. Focus entirely on the hook and summary.
     - End with a brief engaging question or line to spark discussion.
     """
     
-    response = model.generate_content(prompt)
+    response = ai_client.models.generate_content(
+        model='gemini-1.5-flash',
+        contents=prompt,
+    )
     return response.text
 
 def post_to_linkedin(text, article_url):
@@ -93,7 +93,7 @@ def post_to_linkedin(text, article_url):
         return False
 
 def update_db_status(article_id):
-    """Marks the specific article row as posted so it won't be picked up next time."""
+    """Marks the specific article row as posted."""
     conn = psycopg2.connect(DB_URL)
     cur = conn.cursor()
     cur.execute("UPDATE articles SET linkedin_posted = TRUE WHERE id = %s", (article_id,))
@@ -103,7 +103,12 @@ def update_db_status(article_id):
 
 def main():
     print("Fetching new articles from Neon DB...")
-    articles = get_articles_to_post()
+    try:
+        articles = get_articles_to_post()
+    except Exception as e:
+        print(f"Database Query Error: {e}")
+        print("Please verify your table column names match the script selection.")
+        sys.exit(1)
     
     if not articles:
         print("No new unposted articles found for any GCC country.")
@@ -111,18 +116,14 @@ def main():
 
     print(f"Found {len(articles)} country updates to post.")
 
-    for art_id, title, content, url, country in articles:
+    for art_id, title, summary, source_url, country in articles:
         print(f"\n--- Processing: {country} ---")
-        
-        # 1. Ask Gemini to write the text
         print("Generating post copy via Gemini...")
-        linkedin_text = generate_linkedin_content(title, content, country)
+        linkedin_text = generate_linkedin_content(title, summary, country)
         
-        # 2. Publish it live to LinkedIn
         print(f"Publishing to LinkedIn page...")
-        success = post_to_linkedin(linkedin_text, url)
+        success = post_to_linkedin(linkedin_text, source_url)
         
-        # 3. Mark it done if successful
         if success:
             update_db_status(art_id)
             print(f"Success! Database updated for {country} article.")
