@@ -84,7 +84,7 @@ def generate_post_content(title: str, summary: str) -> str:
     """Call Gemini REST API to generate a LinkedIn post."""
     url = (
         f"https://generativelanguage.googleapis.com/v1beta/models/"
-        f"gemini-1.5-flash:generateContent?key={API_KEY}"
+        f"gemini-2.0-flash:generateContent?key={API_KEY}"
     )
     prompt = (
         f"Write a professional LinkedIn post for an Arab startup ecosystem audience.\n"
