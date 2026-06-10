@@ -22,6 +22,33 @@ if not all([DB_URL, GEMINI_API_KEY, LINKEDIN_ACCESS_TOKEN, LINKEDIN_ORG_ID]):
 # Configure Gemini
 genai.configure(api_key=GEMINI_API_KEY)
 
+def get_best_available_model():
+    """
+    Dynamically scans your API key to find an active model that supports text generation.
+    This prevents 404 errors when Google deprecates or changes free-tier model identifiers.
+    """
+    preferred_models = ['gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-1.5-flash']
+    try:
+        available_models = []
+        for m in genai.list_models():
+            if 'generateContent' in m.supported_generation_methods:
+                available_models.append(m.name.replace('models/', ''))
+        
+        print(f"Active Gemini models for your key: {available_models}")
+        
+        for model_name in preferred_models:
+            if model_name in available_models:
+                print(f"→ Automatically selected: {model_name}")
+                return model_name
+                
+        if available_models:
+            print(f"→ Preferred models not found. Using fallback: {available_models[0]}")
+            return available_models[0]
+    except Exception as e:
+        print(f"Notice: Model scanning skipped ({e}). Defaulting to gemini-2.0-flash.")
+    
+    return 'gemini-2.0-flash'
+
 def get_articles_to_post():
     """
     Fetches exactly ONE unposted article for EACH country.
@@ -41,9 +68,9 @@ def get_articles_to_post():
     conn.close()
     return articles
 
-def generate_linkedin_content(title, summary, country):
-    """Uses Gemini 1.5 Flash to generate a snappy, readable LinkedIn post."""
-    model = genai.GenerativeModel('gemini-1.5-flash')
+def generate_linkedin_content(model_name, title, summary, country):
+    """Uses the auto-selected Gemini model to generate a snappy, readable LinkedIn post."""
+    model = genai.GenerativeModel(model_name)
     
     prompt = f"""
     You are the social media voice for 'Arabian Startups Ecosystem', a platform highlighting startup ecosystems in GCC countries.
@@ -119,11 +146,18 @@ def main():
         return
 
     print(f"Found {len(articles)} country updates to post.")
+    
+    # Scan and pick a model dynamically
+    selected_model = get_best_available_model()
 
     for art_id, title, summary, source_url, country in articles:
         print(f"\n--- Processing: {country} ---")
-        print("Generating post copy via Gemini...")
-        linkedin_text = generate_linkedin_content(title, summary, country)
+        print(f"Generating post copy via {selected_model}...")
+        try:
+            linkedin_text = generate_linkedin_content(selected_model, title, summary, country)
+        except Exception as e:
+            print(f"Gemini Generation Error for {country}: {e}")
+            continue
         
         print(f"Publishing to LinkedIn page...")
         success = post_to_linkedin(linkedin_text, source_url)
