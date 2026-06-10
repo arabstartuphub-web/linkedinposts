@@ -142,9 +142,9 @@ def main():
         final_title = get_title_fallback(post_text, country_name, flag)
     print(f"Final title: {final_title}")
 
-    fallback_thumb = f"{GITHUB_BASE}{country_data['code']}.jpg"
-    thumbnail_url = source_url if (source_url and source_url.startswith("http")) else fallback_thumb
-    print(f"Thumbnail URL: {thumbnail_url}")
+    # FIX: Always use the clean country graphic JPG file hosted on GitHub
+    thumbnail_url = f"{GITHUB_BASE}{country_data['code']}.jpg"
+    print(f"Target Graphic URL: {thumbnail_url}")
 
     payload = {
         "text": post_text,
