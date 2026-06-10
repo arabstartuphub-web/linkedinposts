@@ -1,5 +1,6 @@
 import os
 import sys
+import time
 import requests
 import psycopg2
 from datetime import datetime, timezone
@@ -14,19 +15,16 @@ GITHUB_BASE = "https://raw.githubusercontent.com/arabstartuphub-web/linkedinpost
 
 # Maps country name → image code and flag emoji
 COUNTRY_MAP = {
-    "Saudi Arabia": {"code": "KSA",    "flag": "🇸🇦"},
-    "UAE":          {"code": "UAE",    "flag": "🇦🇪"},
-    "Qatar":        {"code": "QATAR",  "flag": "🇶🇦"},
-    "Kuwait":       {"code": "KUWAIT", "flag": "🇰🇼"},
-    "Oman":         {"code": "OMAN",   "flag": "🇴🇲"},
-    "Bahrain":      {"code": "BAHRAIN","flag": "🇧🇭"},
-    "GCC":          {"code": "GCC",    "flag": "🌍"},
+    "Saudi Arabia": {"code": "KSA",     "flag": "🇸🇦"},
+    "UAE":          {"code": "UAE",     "flag": "🇦🇪"},
+    "Qatar":        {"code": "QATAR",   "flag": "🇶🇦"},
+    "Kuwait":       {"code": "KUWAIT",  "flag": "🇰🇼"},
+    "Oman":         {"code": "OMAN",    "flag": "🇴🇲"},
+    "Bahrain":      {"code": "BAHRAIN", "flag": "🇧🇭"},
+    "GCC":          {"code": "GCC",     "flag": "🌍"},
 }
 
 # Maps Python weekday (Mon=0 … Sun=6) → country to post
-# Schedule intent:
-#   Sun, Mon, Wed, Thu, Sat → GCC ecosystem countries (rotate through 5)
-#   Tue, Fri               → UAE, Oman
 WEEKDAY_COUNTRY = {
     0: "Saudi Arabia",  # Monday
     1: "UAE",           # Tuesday
@@ -81,10 +79,10 @@ def mark_article_posted(article_id: int):
 
 
 def generate_post_content(title: str, summary: str) -> str:
-    """Call Gemini REST API to generate a LinkedIn post."""
+    """Call Gemini REST API to generate a LinkedIn post, with retry on 429."""
     url = (
-        f"https://generativelanguage.googleapis.com/v1beta/models/"
-        f"gemini-2.0-flash:generateContent?key={API_KEY}"
+        "https://generativelanguage.googleapis.com/v1beta/models/"
+        f"gemini-2.0-flash-lite:generateContent?key={API_KEY}"
     )
     prompt = (
         f"Write a professional LinkedIn post for an Arab startup ecosystem audience.\n"
@@ -96,40 +94,35 @@ def generate_post_content(title: str, summary: str) -> str:
         f"- End with 4-6 relevant hashtags\n"
         f"- Tone: insightful, professional, engaging"
     )
-    payload = {
-        "contents": [{"parts": [{"text": prompt}]}]
-    }
-    response = requests.post(url, json=payload, timeout=30)
+    payload = {"contents": [{"parts": [{"text": prompt}]}]}
 
-    if response.status_code == 200:
-        data = response.json()
-        return data["candidates"][0]["content"]["parts"][0]["text"].strip()
-    else:
-        print(f"Gemini API Error {response.status_code}: {response.text}")
-        sys.exit(1)
+    for attempt in range(3):
+        response = requests.post(url, json=payload, timeout=30)
+        if response.status_code == 200:
+            data = response.json()
+            return data["candidates"][0]["content"]["parts"][0]["text"].strip()
+        elif response.status_code == 429:
+            wait = 35 * (attempt + 1)  # 35s, 70s, 105s
+            print(f"Rate limited (429). Waiting {wait}s before retry {attempt + 1}/3…")
+            time.sleep(wait)
+        else:
+            print(f"Gemini API Error {response.status_code}: {response.text}")
+            sys.exit(1)
+
+    print("Gemini API still rate-limited after 3 retries. Check quota at https://ai.dev/rate-limit")
+    sys.exit(1)
 
 
 def get_title_fallback(post_text: str, country_name: str, flag: str) -> str:
     """
-    Build a title from the first 2-3 lines of the generated post
+    Build a title from the first 2 lines of the generated post
     + country name + flag, used when the DB title is empty.
     """
     lines = [ln.strip() for ln in post_text.splitlines() if ln.strip()]
-    # Take up to the first 2 non-empty lines, cap at ~80 chars total
     snippet = " ".join(lines[:2])
     if len(snippet) > 80:
         snippet = snippet[:77].rstrip() + "…"
     return f"{flag} {snippet} | {country_name}"
-
-
-def is_image_url_accessible(url: str) -> bool:
-    """Quick HEAD check to see if the source thumbnail URL is reachable."""
-    try:
-        r = requests.head(url, timeout=8, allow_redirects=True)
-        content_type = r.headers.get("Content-Type", "")
-        return r.status_code == 200 and "image" in content_type
-    except Exception:
-        return False
 
 
 def main():
@@ -152,7 +145,6 @@ def main():
     post_text = generate_post_content(db_title or summary or country_name, summary or "")
 
     # 4. Resolve final title
-    #    If DB title is empty/whitespace, derive from post content + country + flag
     if db_title and db_title.strip():
         final_title = f"{flag} {db_title.strip()} | {country_name}"
     else:
@@ -160,21 +152,8 @@ def main():
     print(f"Final title: {final_title}")
 
     # 5. Resolve thumbnail
-    #    Try the article's source URL for an OG/thumbnail image.
-    #    Make.com's HTTP "Download a file" step will attempt to fetch it —
-    #    we just need to pass the best URL we can. If source_url looks like
-    #    a valid article page, pass it and let Make.com extract the image.
-    #    As the absolute fallback, use the country image from this repo.
     fallback_thumb = f"{GITHUB_BASE}{country_data['code']}.jpg"
-
-    if source_url and source_url.startswith("http"):
-        # Pass the article source URL; Make.com's HTTP module will resolve
-        # the OG image. If Make.com returns empty, the workflow should fall
-        # back to the country image — wire that logic in Make.com too.
-        thumbnail_url = source_url
-    else:
-        thumbnail_url = fallback_thumb
-
+    thumbnail_url = source_url if (source_url and source_url.startswith("http")) else fallback_thumb
     print(f"Thumbnail URL: {thumbnail_url}")
     print(f"Fallback thumbnail: {fallback_thumb}")
 
@@ -184,7 +163,7 @@ def main():
         "url": source_url or "",
         "title": final_title,
         "thumbnail_url": thumbnail_url,
-        "fallback_thumbnail_url": fallback_thumb,   # Make.com can use this if HTTP step fails
+        "fallback_thumbnail_url": fallback_thumb,
         "country": country_name,
         "flag": flag,
     }
@@ -194,7 +173,6 @@ def main():
 
     if res.status_code in [200, 201, 204]:
         print("✅ Successfully sent to Make.com.")
-        # 7. Mark article as posted so it won't repeat
         mark_article_posted(article_id)
         print(f"✅ Article ID {article_id} marked as posted.")
     else:
