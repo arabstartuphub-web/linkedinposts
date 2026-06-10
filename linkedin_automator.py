@@ -168,6 +168,7 @@ def generate_post_content(title: str, summary: str) -> str:
         f"Write a professional LinkedIn post for an Arab startup ecosystem audience.\n"
         f"Article title: {title}\n"
         f"Summary: {summary}\n\n"
+        f"IMPORTANT: Write ONLY about the article above. Do not introduce unrelated topics, companies, or technologies not mentioned in the title or summary.\n"
         f"Requirements:\n"
         f"- Start with a compelling hook (no generic openers like 'Exciting news')\n"
         f"- 3-5 short paragraphs\n"
