@@ -34,7 +34,7 @@ def get_daily_article(country_name):
 
 def main():
     # 1. Setup country context
-    country_name = "Qatar" # Ensure this matches your DB
+    country_name = "Qatar" 
     country_data = COUNTRY_MAP.get(country_name, {"code": "GCC", "flag": "🌍"})
     
     article = get_daily_article(country_name)
@@ -50,9 +50,9 @@ def main():
     # 3. GitHub Image Path
     final_thumb = f"{GITHUB_BASE}{country_data['code']}.jpg"
     
-    # 4. Content Generation (Correct SDK usage)
+    # 4. Content Generation (Using gemini-1.0-pro for guaranteed compatibility)
     genai.configure(api_key=GEMINI_API_KEY)
-    model = genai.GenerativeModel('gemini-1.5-flash')
+    model = genai.GenerativeModel('gemini-1.0-pro')
     response = model.generate_content(f"Write a LinkedIn post about: {db_title}")
     
     # 5. Send to Webhook
