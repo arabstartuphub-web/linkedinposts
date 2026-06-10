@@ -43,10 +43,7 @@ def get_country_for_today() -> str:
 
 
 def get_daily_article(country_name: str):
-    """
-    Fetch one unposted article for the given country from Neon DB.
-    Returns (id, title, summary, source_url) or None.
-    """
+    """Fetch one unposted article for the given country from Neon DB."""
     conn = psycopg2.connect(DB_URL)
     cur = conn.cursor()
     cur.execute(
@@ -103,7 +100,7 @@ def generate_post_content(title: str, summary: str) -> str:
             data = response.json()
             return data["candidates"][0]["content"]["parts"][0]["text"].strip()
         elif response.status_code == 429:
-            wait = 35 * (attempt + 1)  # 35s, 70s, 105s
+            wait = 35 * (attempt + 1)
             print(f"Rate limited (429). Waiting {wait}s before retry {attempt + 1}/3…")
             time.sleep(wait)
         else:
@@ -115,10 +112,7 @@ def generate_post_content(title: str, summary: str) -> str:
 
 
 def get_title_fallback(post_text: str, country_name: str, flag: str) -> str:
-    """
-    Build a title from the first 2 lines of the generated post
-    + country name + flag, used when the DB title is empty.
-    """
+    """Build a title from the first 2 lines of the generated post if DB title is empty."""
     lines = [ln.strip() for ln in post_text.splitlines() if ln.strip()]
     snippet = " ".join(lines[:2])
     if len(snippet) > 80:
@@ -157,7 +151,6 @@ def main():
         "url": source_url or "",
         "title": final_title,
         "thumbnail_url": thumbnail_url,
-        "fallback_thumbnail_url": fallback_thumb,
         "country": country_name,
         "flag": flag,
     }
