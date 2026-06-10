@@ -120,8 +120,8 @@ def main():
     art_id, title, summary, source_url, country = article
     print(f"Found article ID {art_id}: '{title}'")
     
-    # Sequential model fallback array to absorb quota exhaustions seamlessly
-    models_to_try = ['gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-1.5-flash']
+    # Modern model fallback array to absorb quota exhaustions seamlessly
+    models_to_try = ['gemini-2.5-flash', 'gemini-3.5-flash', 'gemini-3.1-flash-lite', 'gemini-2.0-flash']
     linkedin_text = None
     
     for model_name in models_to_try:
@@ -132,7 +132,7 @@ def main():
             break
         except Exception as e:
             error_str = str(e).lower()
-            if "429" in error_str or "quota" in error_str:
+            if "429" in error_str or "quota" in error_str or "limit" in error_str:
                 print(f"⚠️ {model_name} free tier rate limit hit. Rolling over to next available model...")
                 continue
             else:
