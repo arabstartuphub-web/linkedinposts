@@ -13,19 +13,11 @@ import google.generativeai as genai
 # 1. Load Environment Variables
 DB_URL = os.environ.get("DATABASE_URL")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
-LINKEDIN_ACCESS_TOKEN = os.environ.get("LINKEDIN_ACCESS_TOKEN")
-RAW_ORG_ID = os.environ.get("LINKEDIN_ORG_ID")
+WEBHOOK_URL = os.environ.get("MAKE_WEBHOOK_URL")
 
-if not all([DB_URL, GEMINI_API_KEY, LINKEDIN_ACCESS_TOKEN, RAW_ORG_ID]):
-    print("Error: Missing one or more environment variables.")
+if not all([DB_URL, GEMINI_API_KEY, WEBHOOK_URL]):
+    print("Error: Missing one or more required environment variables (DATABASE_URL, GEMINI_API_KEY, MAKE_WEBHOOK_URL).")
     sys.exit(1)
-
-# Clean and format the LinkedIn Organization ID safely
-CLEAN_ORG_ID = RAW_ORG_ID.strip().replace('"', '').replace("'", "")
-if not CLEAN_ORG_ID.startswith("urn:li:organization:"):
-    LINKEDIN_ORG_ID = f"urn:li:organization:{CLEAN_ORG_ID}"
-else:
-    LINKEDIN_ORG_ID = CLEAN_ORG_ID
 
 # Configure Gemini
 genai.configure(api_key=GEMINI_API_KEY)
@@ -98,41 +90,27 @@ def generate_linkedin_content(model_name, title, summary, country):
     response = model.generate_content(prompt)
     return response.text
 
-def post_to_linkedin(text, article_url):
-    """Sends the structured payload to the LinkedIn UGC API."""
-    url = "https://api.linkedin.com/v2/ugcPosts"
-    headers = {
-        "Authorization": f"Bearer {LINKEDIN_ACCESS_TOKEN}",
-        "X-Restli-Protocol-Version": "2.0.0",
-        "Content-Type": "application/json"
+def post_to_linkedin_via_webhook(text, article_url):
+    """Routes the generated content to your Make.com bridge to publish on your company page."""
+    payload = {
+        "text": text,
+        "url": article_url
     }
     
-    post_data = {
-        "author": LINKEDIN_ORG_ID,
-        "lifecycleState": "PUBLISHED",
-        "specificContent": {
-            "com.linkedin.ugc.ShareContent": {
-                "shareCommentary": {"text": text},
-                "shareMediaCategory": "ARTICLE",
-                "media": [{
-                    "status": "READY",
-                    "originalUrl": article_url,
-                    "title": {"text": "Read the full update on Arabian Startups Ecosystem"}
-                }]
-            }
-        },
-        "visibility": {"com.linkedin.ugc.MemberNetworkVisibility": "PUBLIC"}
-    }
-    
-    res = requests.post(url, headers=headers, json=post_data)
-    if res.status_code == 201:
-        return True
-    else:
-        print(f"LinkedIn API Error {res.status_code}: {res.text}")
+    try:
+        res = requests.post(WEBHOOK_URL, json=payload)
+        # Accept both 200 OK and 201 Created responses as successes
+        if res.status_code in [200, 201]:
+            return True
+        else:
+            print(f"Webhook Bridge Error {res.status_code}: {res.text}")
+            return False
+    except Exception as e:
+        print(f"Failed to connect to Webhook Bridge: {e}")
         return False
 
 def update_db_status(article_id):
-    """Marks the specific article row as posted."""
+    """Marks the specific article row as posted in Neon DB."""
     conn = psycopg2.connect(DB_URL)
     cur = conn.cursor()
     cur.execute("UPDATE articles SET linkedin_posted = TRUE WHERE id = %s", (article_id,))
@@ -170,14 +148,14 @@ def main():
         print(f"Gemini Generation Error: {e}")
         sys.exit(1)
         
-    print(f"Publishing to LinkedIn page using author handle: {LINKEDIN_ORG_ID}...")
-    success = post_to_linkedin(linkedin_text, source_url)
+    print(f"Routing generated content to Make.com Webhook...")
+    success = post_to_linkedin_via_webhook(linkedin_text, source_url)
     
     if success:
         update_db_status(art_id)
-        print(f"Success! Database updated. Post is live for {country}.")
+        print(f"Success! Webhook fired and Database updated. Post has been passed to your company page.")
     else:
-        print(f"Execution stopped due to LinkedIn API rejection.")
+        print(f"Execution stopped due to Webhook Bridge rejection.")
 
 if __name__ == "__main__":
     main()
