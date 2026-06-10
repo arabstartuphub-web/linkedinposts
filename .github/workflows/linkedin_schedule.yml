@@ -1,9 +1,9 @@
-name: Twice-Weekly LinkedIn Automation
+name: Daily Scheduled LinkedIn Automation
 
 on:
   schedule:
-    - cron: '0 8 * * 0,3'
-  workflow_dispatch: 
+    - cron: '0 5 * * *'  # Runs every day at 5:00 AM UTC (8:00 AM Riyadh time)
+  workflow_dispatch:      # Keeps the manual "Run workflow" button active for testing
 
 jobs:
   run-automation:
