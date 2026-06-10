@@ -34,7 +34,7 @@ def get_daily_article(country_name):
 
 def main():
     # 1. Setup country context
-    country_name = "Qatar" 
+    country_name = "Qatar" # Update as needed for your scheduler
     country_data = COUNTRY_MAP.get(country_name, {"code": "GCC", "flag": "🌍"})
     
     article = get_daily_article(country_name)
@@ -47,13 +47,27 @@ def main():
     # 2. Dynamic Title Formatting
     final_title = f"{country_data['flag']} {db_title} - {country_name}"
     
-    # 3. GitHub Image Path
+    # 3. Direct GitHub Image Link (No downloading needed)
     final_thumb = f"{GITHUB_BASE}{country_data['code']}.jpg"
     
-    # 4. Content Generation (Using gemini-1.0-pro for guaranteed compatibility)
+    # 4. Content Generation with Fallback
     genai.configure(api_key=GEMINI_API_KEY)
-    model = genai.GenerativeModel('gemini-1.0-pro')
-    response = model.generate_content(f"Write a LinkedIn post about: {db_title}")
+    
+    models = ['models/gemini-1.5-flash', 'models/gemini-1.0-pro']
+    response = None
+    
+    for model_name in models:
+        try:
+            model = genai.GenerativeModel(model_name)
+            response = model.generate_content(f"Write a LinkedIn post about: {db_title}")
+            break
+        except Exception as e:
+            print(f"Model {model_name} failed, trying next... Error: {e}")
+            continue
+
+    if not response:
+        print("All models failed.")
+        sys.exit(1)
     
     # 5. Send to Webhook
     payload = {
@@ -65,7 +79,7 @@ def main():
     
     res = requests.post(WEBHOOK_URL, json=payload)
     if res.status_code in [200, 201]:
-        print("Payload sent successfully.")
+        print("Success! Data sent to Make.")
     else:
         print(f"Webhook failed with status {res.status_code}")
 
