@@ -10,15 +10,15 @@ from html.parser import HTMLParser
 from PIL import Image, ImageDraw, ImageFont
 
 # --- CONFIG ---
-DB_URL        = os.environ.get("DATABASE_URL")
-GROQ_API_KEY  = os.environ.get("GROQ_API_KEY")
-GEMINI_API_KEY= os.environ.get("GEMINI_API_KEY")
-NEWS_API_KEY  = os.environ.get("NEWS_API_KEY")
-WEBHOOK_URL   = os.environ.get("MAKE_WEBHOOK_URL")
-GITHUB_TOKEN  = os.environ.get("GITHUB_TOKEN")
-GITHUB_REPO   = "arabstartuphub-web/linkedinposts"
-GITHUB_BRANCH = "main"
-GITHUB_BASE   = f"https://raw.githubusercontent.com/{GITHUB_REPO}/{GITHUB_BRANCH}/"
+DB_URL         = os.environ.get("DATABASE_URL")
+GROQ_API_KEY   = os.environ.get("GROQ_API_KEY")
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
+NEWS_API_KEY   = os.environ.get("NEWS_API_KEY")
+WEBHOOK_URL    = os.environ.get("MAKE_WEBHOOK_URL")
+GITHUB_TOKEN   = os.environ.get("GITHUB_TOKEN")
+GITHUB_REPO    = "arabstartuphub-web/linkedinposts"
+GITHUB_BRANCH  = "main"
+GITHUB_BASE    = f"https://raw.githubusercontent.com/{GITHUB_REPO}/{GITHUB_BRANCH}/"
 
 # --- IMAGE DESIGN ---
 FONT_BOLD  = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
@@ -28,7 +28,6 @@ CYAN_TEAL  = (0, 210, 190)
 WHITE      = (255, 255, 255)
 SHADOW     = (0, 0, 0)
 
-# Maps country name → image code and flag emoji
 COUNTRY_MAP = {
     "Saudi Arabia": {"code": "KSA",     "flag": "🇸🇦"},
     "UAE":          {"code": "UAE",     "flag": "🇦🇪"},
@@ -172,20 +171,13 @@ def draw_shadow(draw, pos, text, font, fill, offset=4):
 
 
 def generate_branded_image(source_image_url, headline, country_name, flag, fallback_banner_url):
-    """
-    Build the branded 1200x627 image:
-      - source photo as background (or country banner as fallback)
-      - white + cyan-teal headline text with shadow
-      - logo bottom-left, website bottom-center
-    Returns a PIL Image object.
-    """
     # Load background
     img_url = source_image_url or fallback_banner_url
     try:
         res  = requests.get(img_url, timeout=10, headers={"User-Agent": "Mozilla/5.0"})
         base = Image.open(io.BytesIO(res.content)).convert("RGB")
     except Exception as e:
-        print(f"⚠️ Background image load failed ({e}), using black canvas.")
+        print(f"⚠️ Background load failed ({e}), using black canvas.")
         base = Image.new("RGB", (IMG_W, IMG_H), (20, 20, 20))
 
     # Resize / centre-crop to 1200x627
@@ -199,6 +191,20 @@ def generate_branded_image(source_image_url, headline, country_name, flag, fallb
     top  = (new_h - IMG_H) // 2
     base = base.crop((left, top, left + IMG_W, top + IMG_H))
 
+    # Black fade — bottom 42%, source image clear on top
+    overlay = Image.new("RGBA", (IMG_W, IMG_H), (0, 0, 0, 0))
+    ov_draw = ImageDraw.Draw(overlay)
+    gradient_start = int(IMG_H * 0.58)
+    gradient_zone  = IMG_H - gradient_start
+    for i in range(gradient_zone):
+        alpha = int(255 * (i / gradient_zone) ** 0.6)
+        ov_draw.rectangle(
+            [(0, gradient_start + i), (IMG_W, gradient_start + i + 1)],
+            fill=(0, 0, 0, alpha)
+        )
+    base = base.convert("RGBA")
+    base = Image.alpha_composite(base, overlay)
+    base = base.convert("RGB")
     draw = ImageDraw.Draw(base)
 
     try:
@@ -208,7 +214,7 @@ def generate_branded_image(source_image_url, headline, country_name, flag, fallb
     except Exception:
         font_headline = font_sub = font_small = ImageFont.load_default()
 
-    # Wrap headline
+    # Headline — first line white, rest cyan-teal
     lines             = wrap_text_centered(headline, font_headline, draw, IMG_W - 160)
     line_h            = 62
     text_block_bottom = IMG_H - 85
@@ -226,17 +232,17 @@ def generate_branded_image(source_image_url, headline, country_name, flag, fallb
         fill=CYAN_TEAL
     )
 
-    # Country + flag
+    # Country + flag in cyan-teal
     ct = f"{flag}  {country_name}  {flag}"
     cw = draw.textlength(ct, font=font_sub)
     draw_shadow(draw, ((IMG_W - cw) // 2, text_block_bottom + 6), ct, font_sub, CYAN_TEAL, offset=3)
 
-    # Website
+    # Website bottom-center
     site = "ase-web.onrender.com"
     sw   = draw.textlength(site, font=font_small)
     draw_shadow(draw, ((IMG_W - sw) // 2, IMG_H - 30), site, font_small, (220, 220, 220), offset=2)
 
-    # Logo bottom-left — fetch from GitHub
+    # Logo bottom-left — fetched from GitHub
     try:
         logo_url = f"{GITHUB_BASE}logo.jpg"
         lr       = requests.get(logo_url, timeout=10)
@@ -252,7 +258,6 @@ def generate_branded_image(source_image_url, headline, country_name, flag, fallb
 # ── GITHUB UPLOAD ────────────────────────────────────────────────────────────
 
 def upload_image_to_github(img: Image.Image, filename: str) -> str:
-    """Upload PIL image to GitHub repo, return its raw URL."""
     buf = io.BytesIO()
     img.save(buf, "JPEG", quality=92)
     content_b64 = base64.b64encode(buf.getvalue()).decode()
@@ -263,7 +268,6 @@ def upload_image_to_github(img: Image.Image, filename: str) -> str:
         "Accept": "application/vnd.github.v3+json",
     }
 
-    # Check if file already exists (need SHA to update)
     sha = None
     check = requests.get(api_url, headers=headers)
     if check.status_code == 200:
@@ -293,7 +297,11 @@ def generate_with_groq(prompt: str) -> str:
         raise ValueError("GROQ_API_KEY missing.")
     url     = "https://api.groq.com/openai/v1/chat/completions"
     headers = {"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"}
-    payload = {"model": "llama-3.3-70b-versatile", "messages": [{"role": "user", "content": prompt}], "temperature": 0.7}
+    payload = {
+        "model": "llama-3.3-70b-versatile",
+        "messages": [{"role": "user", "content": prompt}],
+        "temperature": 0.7
+    }
     for attempt in range(3):
         try:
             r = requests.post(url, json=payload, headers=headers, timeout=20)
@@ -335,7 +343,7 @@ def generate_with_gemini(prompt: str) -> str:
     raise RuntimeError("Gemini exhausted all retries.")
 
 
-def generate_post_content(title: str, summary: str) -> str:
+def generate_post_content(title: str, summary: str, source_url: str) -> str:
     prompt = (
         f"Write a professional LinkedIn post for an Arab startup ecosystem audience.\n"
         f"Article title: {title}\n"
@@ -344,7 +352,9 @@ def generate_post_content(title: str, summary: str) -> str:
         f"Requirements:\n"
         f"- Start with a compelling hook (no generic openers like 'Exciting news')\n"
         f"- 3-5 short paragraphs\n"
-        f"- End with 4-6 relevant hashtags\n"
+        f"- Do NOT include the article URL inside the paragraphs\n"
+        f"- After the last paragraph add exactly one blank line then write: Read more: {source_url}\n"
+        f"- After that add exactly one blank line then end with 4-6 relevant hashtags\n"
         f"- Tone: insightful, professional, engaging\n"
         f"- CRITICAL: Do NOT use markdown formatting. Never use asterisks (**) for bolding or emphasis. Output pure plain text only."
     )
@@ -392,39 +402,45 @@ def main():
 
     print(f"Article: {db_title or '(no title)'}")
 
-    # 2. Generate post text
-    post_text = generate_post_content(db_title or summary or country_name, summary or "")
+    # 2. Generate post text — URL included at end by prompt
+    post_text = generate_post_content(
+        db_title or summary or country_name,
+        summary or "",
+        source_url or ""
+    )
 
-    # 3. Build title
+    # 3. Build title for image headline only
     if db_title and db_title.strip():
         final_title = f"{flag} {db_title.strip()} | {country_name}"
     else:
         final_title = get_title_fallback(post_text, country_name, flag)
     print(f"Final title: {final_title}")
 
-    # 4. Get source og:image (or fall back to country banner)
+    # 4. Get source og:image or fall back to country banner
     print("🔍 Checking article for og:image...")
-    source_image_url  = get_article_image(source_url)
-    fallback_banner   = f"{GITHUB_BASE}{country_data['code']}.jpg"
+    source_image_url = get_article_image(source_url)
+    fallback_banner  = f"{GITHUB_BASE}{country_data['code']}.jpg"
 
     # 5. Generate branded image
     print("🎨 Generating branded image...")
     branded_img = generate_branded_image(
-        source_image_url, db_title or final_title,
-        country_name, flag, fallback_banner
+        source_image_url,
+        db_title or final_title,
+        country_name, flag,
+        fallback_banner
     )
 
     # 6. Upload branded image to GitHub
-    filename     = f"post_{country_data['code']}_{datetime.now(timezone.utc).strftime('%Y%m%d')}.jpg"
+    filename      = f"post_{country_data['code']}_{datetime.now(timezone.utc).strftime('%Y%m%d')}.jpg"
     thumbnail_url = upload_image_to_github(branded_img, filename)
-
     print(f"Target Graphic URL: {thumbnail_url}")
 
     # 7. Send to Make.com
+    # Note: url field is empty — no link preview card, image posts as full visual
     payload = {
         "text":          post_text,
-        "url":           source_url or "",
-        "title":         final_title,
+        "url":           "",
+        "title":         "",
         "thumbnail_url": thumbnail_url,
         "country":       country_name,
         "flag":          flag,
