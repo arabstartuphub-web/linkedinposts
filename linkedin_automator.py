@@ -65,7 +65,7 @@ def get_daily_article(country_name: str):
         SELECT id, title, summary, source_url
         FROM articles
         WHERE linkedin_posted = FALSE AND country = %s
-        ORDER BY created_at ASC
+        ORDER BY published_at DESC
         LIMIT 1;
         """,
         (country_name,),
@@ -337,26 +337,36 @@ def generate_with_groq(prompt: str) -> str:
 
 
 def generate_with_gemini(prompt: str) -> str:
-    if not GEMINI_API_KEY:
-        raise ValueError("GEMINI_API_KEY missing.")
-    url     = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={GEMINI_API_KEY}"
+    keys = [k for k in [
+        os.environ.get("GEMINI_API_KEY"),
+        os.environ.get("GEMINI_API_KEY_BACKUP1"),
+        os.environ.get("GEMINI_API_KEY_BACKUP2"),
+    ] if k]
+    if not keys:
+        raise ValueError("No GEMINI_API_KEY found.")
     payload = {"contents": [{"parts": [{"text": prompt}]}]}
-    for attempt in range(3):
-        try:
-            r = requests.post(url, json=payload, timeout=20)
-            if r.status_code == 200:
-                return r.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
-            elif r.status_code in [429, 503]:
+    for i, key in enumerate(keys):
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={key}"
+        for attempt in range(3):
+            try:
+                r = requests.post(url, json=payload, timeout=20)
+                if r.status_code == 200:
+                    return r.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
+                elif r.status_code in [429, 503]:
+                    if attempt < 2:
+                        wait = 35 * (attempt + 1)
+                        print(f"   [Gemini key {i+1}/{len(keys)} attempt {attempt+1}/3] {r.status_code} — retrying in {wait}s...")
+                        time.sleep(wait)
+                    else:
+                        print(f"   [Gemini key {i+1}/{len(keys)}] rate-limited, trying next key...")
+                        break
+                else:
+                    raise RuntimeError(f"Gemini {r.status_code}: {r.text}")
+            except requests.exceptions.RequestException as e:
                 wait = 35 * (attempt + 1)
-                print(f"   [Gemini {attempt+1}/3] {r.status_code} — retrying in {wait}s...")
+                print(f"   [Gemini key {i+1}/{len(keys)} attempt {attempt+1}/3] {e} — retrying in {wait}s...")
                 time.sleep(wait)
-            else:
-                raise RuntimeError(f"Gemini {r.status_code}: {r.text}")
-        except requests.exceptions.RequestException as e:
-            wait = 35 * (attempt + 1)
-            print(f"   [Gemini {attempt+1}/3] {e} — retrying in {wait}s...")
-            time.sleep(wait)
-    raise RuntimeError("Gemini exhausted all retries.")
+    raise RuntimeError("Gemini exhausted all keys and retries.")
 
 
 def generate_post_content(title: str, summary: str, source_url: str) -> str:
