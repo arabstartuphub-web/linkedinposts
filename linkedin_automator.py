@@ -60,6 +60,8 @@ def get_country_for_today() -> str:
 def get_daily_article(country_name: str):
     conn = psycopg2.connect(DB_URL)
     cur  = conn.cursor()
+
+    # 1st try: exact country match
     cur.execute(
         """
         SELECT id, title, summary, source_url
@@ -71,6 +73,21 @@ def get_daily_article(country_name: str):
         (country_name,),
     )
     row = cur.fetchone()
+
+    # 2nd try: fall back to GCC-tagged articles when country has none
+    if not row and country_name != "GCC":
+        print(f"No unposted articles for {country_name}. Trying GCC pool...")
+        cur.execute(
+            """
+            SELECT id, title, summary, source_url
+            FROM articles
+            WHERE linkedin_posted = FALSE AND country = 'GCC'
+            ORDER BY published_at DESC
+            LIMIT 1;
+            """
+        )
+        row = cur.fetchone()
+
     cur.close()
     conn.close()
     return row
@@ -90,13 +107,13 @@ def mark_article_posted(article_id: int):
 
 def fetch_live_article(country_name: str):
     query_map = {
-        "Saudi Arabia": "Saudi Arabia startup OR economy OR business",
-        "UAE":          "UAE startup OR economy OR business",
-        "Qatar":        "Qatar startup OR economy OR business",
-        "Kuwait":       "Kuwait startup OR economy OR business",
-        "Oman":         "Oman startup OR economy OR business",
-        "Bahrain":      "Bahrain startup OR economy OR business",
-        "GCC":          "GCC startup OR economy OR business",
+        "Saudi Arabia": "Saudi Arabia startup OR funding OR investment OR startup ecosystem",
+        "UAE":          "UAE startup OR funding OR investment OR startup ecosystem",
+        "Qatar":        "Qatar startup OR funding OR investment OR startup ecosystem",
+        "Kuwait":       "Kuwait startup OR funding OR investment OR startup ecosystem",
+        "Oman":         "Oman startup OR funding OR investment OR startup ecosystem",
+        "Bahrain":      "Bahrain startup OR funding OR investment OR startup ecosystem",
+        "GCC":          "GCC OR MENA startup OR funding OR investment OR startup ecosystem",
     }
     query = query_map.get(country_name, "Arab startup ecosystem")
     url = (
