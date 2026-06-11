@@ -1,19 +1,32 @@
 import os
 import sys
 import time
+import base64
+import io
 import requests
 import psycopg2
-from datetime import datetime, timezone, date
+from datetime import datetime, timezone
+from html.parser import HTMLParser
+from PIL import Image, ImageDraw, ImageFont
 
 # --- CONFIG ---
-DB_URL = os.environ.get("DATABASE_URL")
-GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
-NEWS_API_KEY = os.environ.get("NEWS_API_KEY")
-WEBHOOK_URL = os.environ.get("MAKE_WEBHOOK_URL")
+DB_URL        = os.environ.get("DATABASE_URL")
+GROQ_API_KEY  = os.environ.get("GROQ_API_KEY")
+GEMINI_API_KEY= os.environ.get("GEMINI_API_KEY")
+NEWS_API_KEY  = os.environ.get("NEWS_API_KEY")
+WEBHOOK_URL   = os.environ.get("MAKE_WEBHOOK_URL")
+GITHUB_TOKEN  = os.environ.get("GITHUB_TOKEN")
+GITHUB_REPO   = "arabstartuphub-web/linkedinposts"
+GITHUB_BRANCH = "main"
+GITHUB_BASE   = f"https://raw.githubusercontent.com/{GITHUB_REPO}/{GITHUB_BRANCH}/"
 
-# GitHub raw URL base for country banner images
-GITHUB_BASE = "https://raw.githubusercontent.com/arabstartuphub-web/linkedinposts/main/"
+# --- IMAGE DESIGN ---
+FONT_BOLD  = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
+FONT_REG   = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
+IMG_W, IMG_H = 1200, 627
+CYAN_TEAL  = (0, 210, 190)
+WHITE      = (255, 255, 255)
+SHADOW     = (0, 0, 0)
 
 # Maps country name → image code and flag emoji
 COUNTRY_MAP = {
@@ -26,28 +39,27 @@ COUNTRY_MAP = {
     "GCC":          {"code": "GCC",     "flag": "🌍"},
 }
 
-# Maps Python weekday (Mon=0 … Sun=6) → country to post
 WEEKDAY_COUNTRY = {
-    0: "Saudi Arabia",  # Monday
-    1: "UAE",           # Tuesday
-    2: "Qatar",         # Wednesday
-    3: "Kuwait",        # Thursday
-    4: "Oman",          # Friday
-    5: "Bahrain",       # Saturday
-    6: "GCC",           # Sunday
+    0: "Saudi Arabia",
+    1: "UAE",
+    2: "Qatar",
+    3: "Kuwait",
+    4: "Oman",
+    5: "Bahrain",
+    6: "GCC",
 }
 
 
+# ── COUNTRY / ARTICLE HELPERS ────────────────────────────────────────────────
+
 def get_country_for_today() -> str:
-    """Return the country name to post about today based on UTC weekday."""
     weekday = datetime.now(timezone.utc).weekday()
     return WEEKDAY_COUNTRY.get(weekday, "GCC")
 
 
 def get_daily_article(country_name: str):
-    """Fetch one unposted article for the given country from Neon DB."""
     conn = psycopg2.connect(DB_URL)
-    cur = conn.cursor()
+    cur  = conn.cursor()
     cur.execute(
         """
         SELECT id, title, summary, source_url
@@ -65,9 +77,8 @@ def get_daily_article(country_name: str):
 
 
 def mark_article_posted(article_id: int):
-    """Mark the article as posted so it won't be reused."""
     conn = psycopg2.connect(DB_URL)
-    cur = conn.cursor()
+    cur  = conn.cursor()
     cur.execute(
         "UPDATE articles SET linkedin_posted = TRUE WHERE id = %s;",
         (article_id,),
@@ -78,7 +89,6 @@ def mark_article_posted(article_id: int):
 
 
 def fetch_live_article(country_name: str):
-    """Fetch a fresh article from NewsAPI when DB is empty for today's country."""
     query_map = {
         "Saudi Arabia": "Saudi Arabia startup OR economy OR business",
         "UAE":          "UAE startup OR economy OR business",
@@ -92,9 +102,7 @@ def fetch_live_article(country_name: str):
     url = (
         f"https://newsapi.org/v2/everything"
         f"?q={requests.utils.quote(query)}"
-        f"&language=en"
-        f"&sortBy=publishedAt"
-        f"&pageSize=1"
+        f"&language=en&sortBy=publishedAt&pageSize=1"
         f"&apiKey={NEWS_API_KEY}"
     )
     try:
@@ -103,84 +111,231 @@ def fetch_live_article(country_name: str):
             articles = res.json().get("articles", [])
             if articles:
                 a = articles[0]
-                title = a.get("title", "")
-                summary = a.get("description", "") or a.get("content", "")
-                source_url = a.get("url", "")
-                print(f"✅ Live article fetched: {title}")
-                return title, summary, source_url
+                print(f"✅ Live article fetched: {a.get('title','')}")
+                return a.get("title",""), a.get("description","") or a.get("content",""), a.get("url","")
     except Exception as e:
         print(f"NewsAPI error: {e}")
     return None, None, None
 
 
-def generate_with_groq(prompt: str) -> str:
-    """Call Groq Cloud REST API using Llama 3.3 70B with up to 3 retries."""
-    if not GROQ_API_KEY:
-        raise ValueError("GROQ_API_KEY is missing from environment.")
+# ── OG:IMAGE EXTRACTOR ───────────────────────────────────────────────────────
 
-    url = "https://api.groq.com/openai/v1/chat/completions"
+def get_article_image(url: str) -> str:
+    if not url:
+        return None
+    try:
+        res = requests.get(url, timeout=10, headers={"User-Agent": "Mozilla/5.0"})
+        if res.status_code == 200:
+            class OGParser(HTMLParser):
+                def __init__(self):
+                    super().__init__()
+                    self.og_image = None
+                def handle_starttag(self, tag, attrs):
+                    if tag == "meta":
+                        d = dict(attrs)
+                        if d.get("property") == "og:image":
+                            self.og_image = d.get("content")
+            parser = OGParser()
+            parser.feed(res.text)
+            if parser.og_image:
+                print(f"✅ og:image found: {parser.og_image}")
+                return parser.og_image
+    except Exception as e:
+        print(f"⚠️ Could not fetch og:image: {e}")
+    return None
+
+
+# ── IMAGE GENERATION ─────────────────────────────────────────────────────────
+
+def wrap_text_centered(text, font, draw, max_width):
+    words = text.split()
+    lines, current = [], ""
+    for word in words:
+        test = f"{current} {word}".strip()
+        if draw.textlength(test, font=font) <= max_width:
+            current = test
+        else:
+            if current:
+                lines.append(current)
+            current = word
+    if current:
+        lines.append(current)
+    return lines[:4]
+
+
+def draw_shadow(draw, pos, text, font, fill, offset=4):
+    x, y = pos
+    for dx, dy in [(-offset,offset),(offset,offset),(-offset,-offset),(offset,-offset),
+                   (0,offset),(0,-offset),(-offset,0),(offset,0)]:
+        draw.text((x+dx, y+dy), text, font=font, fill=SHADOW)
+    draw.text((x, y), text, font=font, fill=fill)
+
+
+def generate_branded_image(source_image_url, headline, country_name, flag, fallback_banner_url):
+    """
+    Build the branded 1200x627 image:
+      - source photo as background (or country banner as fallback)
+      - white + cyan-teal headline text with shadow
+      - logo bottom-left, website bottom-center
+    Returns a PIL Image object.
+    """
+    # Load background
+    img_url = source_image_url or fallback_banner_url
+    try:
+        res  = requests.get(img_url, timeout=10, headers={"User-Agent": "Mozilla/5.0"})
+        base = Image.open(io.BytesIO(res.content)).convert("RGB")
+    except Exception as e:
+        print(f"⚠️ Background image load failed ({e}), using black canvas.")
+        base = Image.new("RGB", (IMG_W, IMG_H), (20, 20, 20))
+
+    # Resize / centre-crop to 1200x627
+    bw, bh = base.size
+    if bw / bh > IMG_W / IMG_H:
+        new_h, new_w = IMG_H, int((bw / bh) * IMG_H)
+    else:
+        new_w, new_h = IMG_W, int((bh / bw) * IMG_W)
+    base = base.resize((new_w, new_h), Image.LANCZOS)
+    left = (new_w - IMG_W) // 2
+    top  = (new_h - IMG_H) // 2
+    base = base.crop((left, top, left + IMG_W, top + IMG_H))
+
+    draw = ImageDraw.Draw(base)
+
+    try:
+        font_headline = ImageFont.truetype(FONT_BOLD, 50)
+        font_sub      = ImageFont.truetype(FONT_BOLD, 30)
+        font_small    = ImageFont.truetype(FONT_REG,  21)
+    except Exception:
+        font_headline = font_sub = font_small = ImageFont.load_default()
+
+    # Wrap headline
+    lines             = wrap_text_centered(headline, font_headline, draw, IMG_W - 160)
+    line_h            = 62
+    text_block_bottom = IMG_H - 85
+    text_y            = text_block_bottom - (len(lines) * line_h)
+
+    for idx, line in enumerate(lines):
+        color = WHITE if idx == 0 else CYAN_TEAL
+        w = draw.textlength(line, font=font_headline)
+        draw_shadow(draw, ((IMG_W - w) // 2, text_y), line, font_headline, color, offset=4)
+        text_y += line_h
+
+    # Thin cyan underline
+    draw.rectangle(
+        [(IMG_W//2 - 200, text_block_bottom - 2), (IMG_W//2 + 200, text_block_bottom + 3)],
+        fill=CYAN_TEAL
+    )
+
+    # Country + flag
+    ct = f"{flag}  {country_name}  {flag}"
+    cw = draw.textlength(ct, font=font_sub)
+    draw_shadow(draw, ((IMG_W - cw) // 2, text_block_bottom + 6), ct, font_sub, CYAN_TEAL, offset=3)
+
+    # Website
+    site = "ase-web.onrender.com"
+    sw   = draw.textlength(site, font=font_small)
+    draw_shadow(draw, ((IMG_W - sw) // 2, IMG_H - 30), site, font_small, (220, 220, 220), offset=2)
+
+    # Logo bottom-left — fetch from GitHub
+    try:
+        logo_url = f"{GITHUB_BASE}logo.jpg"
+        lr       = requests.get(logo_url, timeout=10)
+        logo     = Image.open(io.BytesIO(lr.content)).convert("RGBA")
+        logo     = logo.resize((95, 95), Image.LANCZOS)
+        base.paste(logo, (22, IMG_H - 115), logo)
+    except Exception as e:
+        print(f"⚠️ Logo load failed: {e}")
+
+    return base
+
+
+# ── GITHUB UPLOAD ────────────────────────────────────────────────────────────
+
+def upload_image_to_github(img: Image.Image, filename: str) -> str:
+    """Upload PIL image to GitHub repo, return its raw URL."""
+    buf = io.BytesIO()
+    img.save(buf, "JPEG", quality=92)
+    content_b64 = base64.b64encode(buf.getvalue()).decode()
+
+    api_url = f"https://api.github.com/repos/{GITHUB_REPO}/contents/generated/{filename}"
     headers = {
-        "Authorization": f"Bearer {GROQ_API_KEY}",
-        "Content-Type": "application/json"
-    }
-    payload = {
-        "model": "llama-3.3-70b-versatile",
-        "messages": [{"role": "user", "content": prompt}],
-        "temperature": 0.7
+        "Authorization": f"token {GITHUB_TOKEN}",
+        "Accept": "application/vnd.github.v3+json",
     }
 
+    # Check if file already exists (need SHA to update)
+    sha = None
+    check = requests.get(api_url, headers=headers)
+    if check.status_code == 200:
+        sha = check.json().get("sha")
+
+    body = {
+        "message": f"Auto-generated post image: {filename}",
+        "content": content_b64,
+        "branch":  GITHUB_BRANCH,
+    }
+    if sha:
+        body["sha"] = sha
+
+    res = requests.put(api_url, headers=headers, json=body, timeout=30)
+    if res.status_code in [200, 201]:
+        raw_url = f"{GITHUB_BASE}generated/{filename}"
+        print(f"✅ Image uploaded to GitHub: {raw_url}")
+        return raw_url
+    else:
+        raise RuntimeError(f"GitHub upload failed {res.status_code}: {res.text}")
+
+
+# ── AI GENERATION ────────────────────────────────────────────────────────────
+
+def generate_with_groq(prompt: str) -> str:
+    if not GROQ_API_KEY:
+        raise ValueError("GROQ_API_KEY missing.")
+    url     = "https://api.groq.com/openai/v1/chat/completions"
+    headers = {"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"}
+    payload = {"model": "llama-3.3-70b-versatile", "messages": [{"role": "user", "content": prompt}], "temperature": 0.7}
     for attempt in range(3):
         try:
-            response = requests.post(url, json=payload, headers=headers, timeout=20)
-            if response.status_code == 200:
-                return response.json()["choices"][0]["message"]["content"].strip()
-            elif response.status_code in [429, 503]:
+            r = requests.post(url, json=payload, headers=headers, timeout=20)
+            if r.status_code == 200:
+                return r.json()["choices"][0]["message"]["content"].strip()
+            elif r.status_code in [429, 503]:
                 wait = 15 * (attempt + 1)
-                print(f"   [Groq Attempt {attempt + 1}/3] Status {response.status_code}. Retrying in {wait}s...")
+                print(f"   [Groq {attempt+1}/3] {r.status_code} — retrying in {wait}s...")
                 time.sleep(wait)
             else:
-                raise RuntimeError(f"Groq API error {response.status_code}: {response.text}")
+                raise RuntimeError(f"Groq {r.status_code}: {r.text}")
         except requests.exceptions.RequestException as e:
             wait = 15 * (attempt + 1)
-            print(f"   [Groq Attempt {attempt + 1}/3] Connection issue: {e}. Retrying in {wait}s...")
+            print(f"   [Groq {attempt+1}/3] {e} — retrying in {wait}s...")
             time.sleep(wait)
-
-    raise RuntimeError("Groq completely exhausted all 3 retry attempts.")
+    raise RuntimeError("Groq exhausted all retries.")
 
 
 def generate_with_gemini(prompt: str) -> str:
-    """Call Gemini REST API using Gemini 2.0 Flash with up to 3 retries."""
     if not GEMINI_API_KEY:
-        raise ValueError("GEMINI_API_KEY is missing from environment.")
-
-    url = (
-        "https://generativelanguage.googleapis.com/v1beta/models/"
-        f"gemini-2.0-flash:generateContent?key={GEMINI_API_KEY}"
-    )
+        raise ValueError("GEMINI_API_KEY missing.")
+    url     = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={GEMINI_API_KEY}"
     payload = {"contents": [{"parts": [{"text": prompt}]}]}
-
     for attempt in range(3):
         try:
-            response = requests.post(url, json=payload, timeout=20)
-            if response.status_code == 200:
-                data = response.json()
-                return data["candidates"][0]["content"]["parts"][0]["text"].strip()
-            elif response.status_code in [429, 503]:
+            r = requests.post(url, json=payload, timeout=20)
+            if r.status_code == 200:
+                return r.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
+            elif r.status_code in [429, 503]:
                 wait = 35 * (attempt + 1)
-                print(f"   [Gemini Attempt {attempt + 1}/3] Status {response.status_code}. Retrying in {wait}s...")
+                print(f"   [Gemini {attempt+1}/3] {r.status_code} — retrying in {wait}s...")
                 time.sleep(wait)
             else:
-                raise RuntimeError(f"Gemini API error {response.status_code}: {response.text}")
+                raise RuntimeError(f"Gemini {r.status_code}: {r.text}")
         except requests.exceptions.RequestException as e:
             wait = 35 * (attempt + 1)
-            print(f"   [Gemini Attempt {attempt + 1}/3] Connection issue: {e}. Retrying in {wait}s...")
+            print(f"   [Gemini {attempt+1}/3] {e} — retrying in {wait}s...")
             time.sleep(wait)
-
-    raise RuntimeError("Gemini completely exhausted all 3 retry attempts.")
+    raise RuntimeError("Gemini exhausted all retries.")
 
 
 def generate_post_content(title: str, summary: str) -> str:
-    """Smart Fallback Engine: Tries Groq 3 times, then falls back to Gemini 3 times."""
     prompt = (
         f"Write a professional LinkedIn post for an Arab startup ecosystem audience.\n"
         f"Article title: {title}\n"
@@ -193,40 +348,40 @@ def generate_post_content(title: str, summary: str) -> str:
         f"- Tone: insightful, professional, engaging\n"
         f"- CRITICAL: Do NOT use markdown formatting. Never use asterisks (**) for bolding or emphasis. Output pure plain text only."
     )
-
-    print("🚀 Running Primary Generation Engine: Groq (Llama-3.3)...")
+    print("🚀 Primary Engine: Groq (Llama-3.3)...")
     try:
         return generate_with_groq(prompt)
-    except Exception as groq_error:
-        print(f"⚠️ Primary Engine (Groq) failed: {groq_error}")
-        print("🔄 Activating Secondary Shield: Google Gemini...")
+    except Exception as e:
+        print(f"⚠️ Groq failed: {e}")
+        print("🔄 Fallback: Gemini...")
         try:
             return generate_with_gemini(prompt)
-        except Exception as gemini_error:
-            print(f"❌ Fallback Engine (Gemini) also failed: {gemini_error}")
-            print("🚨 Critical: Both AI systems failed to produce a response.")
+        except Exception as e2:
+            print(f"❌ Gemini failed: {e2}")
+            print("🚨 Both AI engines failed.")
             sys.exit(1)
 
 
 def get_title_fallback(post_text: str, country_name: str, flag: str) -> str:
-    """Build a title from the first 2 lines of the generated post if DB title is empty."""
-    lines = [ln.strip() for ln in post_text.splitlines() if ln.strip()]
+    lines   = [ln.strip() for ln in post_text.splitlines() if ln.strip()]
     snippet = " ".join(lines[:2])
     if len(snippet) > 80:
         snippet = snippet[:77].rstrip() + "…"
     return f"{flag} {snippet} | {country_name}"
 
 
+# ── MAIN ─────────────────────────────────────────────────────────────────────
+
 def main():
     country_name = get_country_for_today()
     country_data = COUNTRY_MAP.get(country_name, {"code": "GCC", "flag": "🌍"})
-    flag = country_data["flag"]
+    flag         = country_data["flag"]
     print(f"Today's scheduled country: {country_name} {flag}")
 
+    # 1. Get article
     article = get_daily_article(country_name)
-
     if not article:
-        print(f"No unposted articles in DB for {country_name}. Fetching live from NewsAPI...")
+        print(f"No DB articles for {country_name}. Fetching live from NewsAPI...")
         article_id = None
         db_title, summary, source_url = fetch_live_article(country_name)
         if not db_title:
@@ -235,19 +390,37 @@ def main():
     else:
         article_id, db_title, summary, source_url = article
 
-    print(f"Article ID {article_id}: {db_title or '(no title)'}")
+    print(f"Article: {db_title or '(no title)'}")
 
+    # 2. Generate post text
     post_text = generate_post_content(db_title or summary or country_name, summary or "")
 
+    # 3. Build title
     if db_title and db_title.strip():
         final_title = f"{flag} {db_title.strip()} | {country_name}"
     else:
         final_title = get_title_fallback(post_text, country_name, flag)
     print(f"Final title: {final_title}")
 
-    thumbnail_url = f"{GITHUB_BASE}{country_data['code']}.jpg"
+    # 4. Get source og:image (or fall back to country banner)
+    print("🔍 Checking article for og:image...")
+    source_image_url  = get_article_image(source_url)
+    fallback_banner   = f"{GITHUB_BASE}{country_data['code']}.jpg"
+
+    # 5. Generate branded image
+    print("🎨 Generating branded image...")
+    branded_img = generate_branded_image(
+        source_image_url, db_title or final_title,
+        country_name, flag, fallback_banner
+    )
+
+    # 6. Upload branded image to GitHub
+    filename     = f"post_{country_data['code']}_{datetime.now(timezone.utc).strftime('%Y%m%d')}.jpg"
+    thumbnail_url = upload_image_to_github(branded_img, filename)
+
     print(f"Target Graphic URL: {thumbnail_url}")
 
+    # 7. Send to Make.com
     payload = {
         "text":          post_text,
         "url":           source_url or "",
@@ -257,7 +430,7 @@ def main():
         "flag":          flag,
     }
 
-    print("Sending to Make.com webhook…")
+    print("📤 Sending to Make.com webhook…")
     res = requests.post(WEBHOOK_URL, json=payload, timeout=30)
 
     if res.status_code in [200, 201, 204]:
