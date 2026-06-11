@@ -2,17 +2,24 @@ name: Keep Alive
 
 on:
   schedule:
-    - cron: "0 0 * * 1"  # Every Monday at midnight UTC
+    - cron: "0 0 1 * *"  # 1st of every month at midnight UTC
   workflow_dispatch:
 
 jobs:
   keepalive:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
       - name: Keep repository active
         run: |
-          git config user.email "action@github.com"
-          git config user.name "GitHub Action"
-          git commit --allow-empty -m "chore: keepalive $(date +'%Y-%m')"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git config user.name "github-actions[bot]"
+          echo "Last keepalive: $(date -u '+%Y-%m-%d %H:%M UTC')" > .github/last-alive.txt
+          git add .github/last-alive.txt
+          git diff --staged --quiet \
+            || git commit -m "chore: keepalive $(date -u +%Y-%m)"
           git push
