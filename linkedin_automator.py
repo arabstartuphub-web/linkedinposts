@@ -8,6 +8,7 @@ import psycopg2
 from datetime import datetime, timezone
 from html.parser import HTMLParser
 from PIL import Image, ImageDraw, ImageFont
+from pilmoji import Pilmoji
 
 # --- CONFIG ---
 DB_URL         = os.environ.get("DATABASE_URL")
@@ -21,12 +22,12 @@ GITHUB_BRANCH  = "main"
 GITHUB_BASE    = f"https://raw.githubusercontent.com/{GITHUB_REPO}/{GITHUB_BRANCH}/"
 
 # --- IMAGE DESIGN ---
-FONT_BOLD  = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
-FONT_REG   = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
-IMG_W, IMG_H = 1200, 627
-ORANGE_RED = (255, 80, 30)
-WHITE      = (255, 255, 255)
-SHADOW     = (0, 0, 0)
+FONT_BOLD      = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
+FONT_REG       = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
+IMG_W, IMG_H   = 1200, 627
+ELECTRIC_CYAN  = (0, 230, 255)
+WHITE          = (255, 255, 255)
+SHADOW         = (0, 0, 0)
 
 COUNTRY_MAP = {
     "Saudi Arabia": {"code": "KSA",     "flag": "🇸🇦"},
@@ -151,7 +152,11 @@ def wrap_text_centered(text, font, draw, max_width):
     lines, current = [], ""
     for word in words:
         test = f"{current} {word}".strip()
-        if draw.textlength(test, font=font) <= max_width:
+        try:
+            w = draw.textlength(test, font=font)
+        except Exception:
+            w = len(test) * 30
+        if w <= max_width:
             current = test
         else:
             if current:
@@ -160,14 +165,6 @@ def wrap_text_centered(text, font, draw, max_width):
     if current:
         lines.append(current)
     return lines[:4]
-
-
-def draw_shadow(draw, pos, text, font, fill, offset=4):
-    x, y = pos
-    for dx, dy in [(-offset,offset),(offset,offset),(-offset,-offset),(offset,-offset),
-                   (0,offset),(0,-offset),(-offset,0),(offset,0)]:
-        draw.text((x+dx, y+dy), text, font=font, fill=SHADOW)
-    draw.text((x, y), text, font=font, fill=fill)
 
 
 def generate_branded_image(source_image_url, headline, country_name, flag, fallback_banner_url):
@@ -190,6 +187,8 @@ def generate_branded_image(source_image_url, headline, country_name, flag, fallb
     left = (new_w - IMG_W) // 2
     top  = (new_h - IMG_H) // 2
     base = base.crop((left, top, left + IMG_W, top + IMG_H))
+    # Ensure exact output size
+    base = base.resize((IMG_W, IMG_H), Image.LANCZOS)
 
     # Solid black strip behind text
     overlay = Image.new("RGBA", (IMG_W, IMG_H), (0, 0, 0, 0))
@@ -206,39 +205,58 @@ def generate_branded_image(source_image_url, headline, country_name, flag, fallb
     draw = ImageDraw.Draw(base)
 
     try:
-        font_headline = ImageFont.truetype(FONT_BOLD, 50)
+        font_headline = ImageFont.truetype(FONT_BOLD, 58)
         font_sub      = ImageFont.truetype(FONT_BOLD, 30)
         font_small    = ImageFont.truetype(FONT_REG,  21)
     except Exception:
         font_headline = font_sub = font_small = ImageFont.load_default()
 
-    # Headline — first line white, rest orange-red
+    # Wrap headline text
     lines             = wrap_text_centered(headline, font_headline, draw, IMG_W - 160)
-    line_h            = 62
+    line_h            = 68
     text_block_bottom = IMG_H - 85
     text_y            = text_block_bottom - (len(lines) * line_h)
 
-    for idx, line in enumerate(lines):
-        color = WHITE if idx == 0 else ORANGE_RED
-        w = draw.textlength(line, font=font_headline)
-        draw_shadow(draw, ((IMG_W - w) // 2, text_y), line, font_headline, color, offset=4)
-        text_y += line_h
+    # Draw headline with Pilmoji (supports emoji rendering)
+    with Pilmoji(base) as pilmoji:
+        for idx, line in enumerate(lines):
+            color = WHITE if idx == 0 else ELECTRIC_CYAN
+            try:
+                w = draw.textlength(line, font=font_headline)
+            except Exception:
+                w = len(line) * 32
+            x = (IMG_W - w) // 2
+            # Draw shadow
+            for dx, dy in [(-4,4),(4,4),(-4,-4),(4,-4),(0,4),(0,-4),(-4,0),(4,0)]:
+                pilmoji.text((x+dx, text_y+dy), line, font=font_headline, fill=SHADOW)
+            # Draw main text
+            pilmoji.text((x, text_y), line, font=font_headline, fill=color)
+            text_y += line_h
 
-    # Thin orange-red underline
+    # Thin electric cyan underline
     draw.rectangle(
         [(IMG_W//2 - 200, text_block_bottom - 2), (IMG_W//2 + 200, text_block_bottom + 3)],
-        fill=ORANGE_RED
+        fill=ELECTRIC_CYAN
     )
 
-    # Country + flag in orange-red
+    # Country + flag in electric cyan using Pilmoji
     ct = f"{flag}  {country_name}  {flag}"
-    cw = draw.textlength(ct, font=font_sub)
-    draw_shadow(draw, ((IMG_W - cw) // 2, text_block_bottom + 6), ct, font_sub, ORANGE_RED, offset=3)
+    with Pilmoji(base) as pilmoji:
+        try:
+            cw = draw.textlength(ct, font=font_sub)
+        except Exception:
+            cw = len(ct) * 18
+        cx = (IMG_W - cw) // 2
+        for dx, dy in [(-3,3),(3,3),(-3,-3),(3,-3),(0,3),(0,-3),(-3,0),(3,0)]:
+            pilmoji.text((cx+dx, text_block_bottom+6+dy), ct, font=font_sub, fill=SHADOW)
+        pilmoji.text((cx, text_block_bottom + 6), ct, font=font_sub, fill=ELECTRIC_CYAN)
 
     # Website bottom-center
     site = "ase-web.onrender.com"
     sw   = draw.textlength(site, font=font_small)
-    draw_shadow(draw, ((IMG_W - sw) // 2, IMG_H - 30), site, font_small, (220, 220, 220), offset=2)
+    for dx, dy in [(-2,2),(2,2),(-2,-2),(2,-2),(0,2),(0,-2),(-2,0),(2,0)]:
+        draw.text(((IMG_W - sw)//2 + dx, IMG_H - 30 + dy), site, font=font_small, fill=SHADOW)
+    draw.text(((IMG_W - sw) // 2, IMG_H - 30), site, font=font_small, fill=(220, 220, 220))
 
     # Logo bottom-left — fetched from GitHub
     try:
