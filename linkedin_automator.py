@@ -24,7 +24,7 @@ GITHUB_BASE    = f"https://raw.githubusercontent.com/{GITHUB_REPO}/{GITHUB_BRANC
 FONT_BOLD  = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
 FONT_REG   = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
 IMG_W, IMG_H = 1200, 627
-CYAN_TEAL  = (0, 210, 190)
+ORANGE_RED = (255, 80, 30)
 WHITE      = (255, 255, 255)
 SHADOW     = (0, 0, 0)
 
@@ -191,17 +191,15 @@ def generate_branded_image(source_image_url, headline, country_name, flag, fallb
     top  = (new_h - IMG_H) // 2
     base = base.crop((left, top, left + IMG_W, top + IMG_H))
 
-    # Black fade — bottom 42%, source image clear on top
+    # Solid black strip behind text
     overlay = Image.new("RGBA", (IMG_W, IMG_H), (0, 0, 0, 0))
     ov_draw = ImageDraw.Draw(overlay)
-    gradient_start = int(IMG_H * 0.58)
-    gradient_zone  = IMG_H - gradient_start
-    for i in range(gradient_zone):
-        alpha = int(255 * (i / gradient_zone) ** 0.6)
-        ov_draw.rectangle(
-            [(0, gradient_start + i), (IMG_W, gradient_start + i + 1)],
-            fill=(0, 0, 0, alpha)
-        )
+    strip_top    = int(IMG_H * 0.55)
+    strip_bottom = IMG_H - 10
+    ov_draw.rectangle(
+        [(0, strip_top), (IMG_W, strip_bottom)],
+        fill=(0, 0, 0, 210)
+    )
     base = base.convert("RGBA")
     base = Image.alpha_composite(base, overlay)
     base = base.convert("RGB")
@@ -214,28 +212,28 @@ def generate_branded_image(source_image_url, headline, country_name, flag, fallb
     except Exception:
         font_headline = font_sub = font_small = ImageFont.load_default()
 
-    # Headline — first line white, rest cyan-teal
+    # Headline — first line white, rest orange-red
     lines             = wrap_text_centered(headline, font_headline, draw, IMG_W - 160)
     line_h            = 62
     text_block_bottom = IMG_H - 85
     text_y            = text_block_bottom - (len(lines) * line_h)
 
     for idx, line in enumerate(lines):
-        color = WHITE if idx == 0 else CYAN_TEAL
+        color = WHITE if idx == 0 else ORANGE_RED
         w = draw.textlength(line, font=font_headline)
         draw_shadow(draw, ((IMG_W - w) // 2, text_y), line, font_headline, color, offset=4)
         text_y += line_h
 
-    # Thin cyan underline
+    # Thin orange-red underline
     draw.rectangle(
         [(IMG_W//2 - 200, text_block_bottom - 2), (IMG_W//2 + 200, text_block_bottom + 3)],
-        fill=CYAN_TEAL
+        fill=ORANGE_RED
     )
 
-    # Country + flag in cyan-teal
+    # Country + flag in orange-red
     ct = f"{flag}  {country_name}  {flag}"
     cw = draw.textlength(ct, font=font_sub)
-    draw_shadow(draw, ((IMG_W - cw) // 2, text_block_bottom + 6), ct, font_sub, CYAN_TEAL, offset=3)
+    draw_shadow(draw, ((IMG_W - cw) // 2, text_block_bottom + 6), ct, font_sub, ORANGE_RED, offset=3)
 
     # Website bottom-center
     site = "ase-web.onrender.com"
@@ -409,9 +407,13 @@ def main():
         source_url or ""
     )
 
-    # 3. Build title for image headline only
+    # 3. Build title for image headline with emoji prefix
     if db_title and db_title.strip():
-        final_title = f"{flag} {db_title.strip()} | {country_name}"
+        title_lower = db_title.lower()
+        emoji_prefix = "💰" if any(w in title_lower for w in ["fund", "million", "billion", "invest", "raise"]) else \
+                       "🚀" if any(w in title_lower for w in ["launch", "startup", "expansion"]) else \
+                       "📈" if any(w in title_lower for w in ["growth", "economy", "gdp", "market"]) else "🌍"
+        final_title = f"{emoji_prefix} {db_title.strip()}"
     else:
         final_title = get_title_fallback(post_text, country_name, flag)
     print(f"Final title: {final_title}")
@@ -425,7 +427,7 @@ def main():
     print("🎨 Generating branded image...")
     branded_img = generate_branded_image(
         source_image_url,
-        db_title or final_title,
+        final_title,
         country_name, flag,
         fallback_banner
     )
