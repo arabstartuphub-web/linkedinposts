@@ -2,7 +2,7 @@ name: Keep Alive
 
 on:
   schedule:
-    - cron: "0 0 1 * *"  # Runs on the 1st of every month
+    - cron: "0 0 * * 1"  # Every Monday at midnight UTC
   workflow_dispatch:
 
 jobs:
