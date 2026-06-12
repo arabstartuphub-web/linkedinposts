@@ -12,7 +12,6 @@ from PIL import Image, ImageDraw, ImageFont
 # ── CONFIG ────────────────────────────────────────────────────────────────────
 DB_URL         = os.environ.get("DATABASE_URL")
 GROQ_API_KEY   = os.environ.get("GROQ_API_KEY")
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 NEWS_API_KEY   = os.environ.get("NEWS_API_KEY")
 WEBHOOK_URL    = os.environ.get("MAKE_WEBHOOK_URL")
 GITHUB_TOKEN   = os.environ.get("GITHUB_TOKEN")
@@ -20,27 +19,23 @@ GITHUB_REPO    = "arabstartuphub-web/linkedinposts"
 GITHUB_BRANCH  = "main"
 GITHUB_BASE    = f"https://raw.githubusercontent.com/{GITHUB_REPO}/{GITHUB_BRANCH}/"
 
+# All 3 Gemini keys — used for both text generation and image generation
+GEMINI_KEYS = [k for k in [
+    os.environ.get("GEMINI_API_KEY"),
+    os.environ.get("GEMINI_API_KEY_BACKUP1"),
+    os.environ.get("GEMINI_API_KEY_BACKUP2"),
+] if k]
+
 # ── IMAGE DESIGN ─────────────────────────────────────────────────────────────
-IMG_W, IMG_H = 1080, 1080   # Square (LinkedIn best practice)
+IMG_W, IMG_H = 1080, 1080
 
 FONT_BOLD   = "/usr/share/fonts/truetype/google-fonts/Poppins-Bold.ttf"
 FONT_MEDIUM = "/usr/share/fonts/truetype/google-fonts/Poppins-Medium.ttf"
 
 WHITE     = (255, 255, 255)
 BLACK     = (15,  15,  15)
-ORANGE    = (224, 82,  18)   # Smashi-style highlight
-BLUE_LINE = (25,  100, 220)  # Card bottom accent
-
-# Per-country gradient background (used when no OG photo is available)
-COUNTRY_GRADIENTS = {
-    "Saudi Arabia": ((0,  80,  40),  (0,  30, 15)),
-    "UAE":          ((0,  55, 110),  (0,  20, 60)),
-    "Qatar":        ((75,  0,  40),  (35,  0, 18)),
-    "Kuwait":       ((80, 58,   0),  (35, 25,  0)),
-    "Oman":         ((60, 18,   0),  (28,  8,  0)),
-    "Bahrain":      ((0,  38, 100),  (0,  15, 55)),
-    "GCC":          ((18, 18,  60),  (5,   5, 28)),
-}
+ORANGE    = (224, 82,  18)
+BLUE_LINE = (25,  100, 220)
 
 COUNTRY_MAP = {
     "Saudi Arabia": {"code": "KSA",     "flag": "🇸🇦"},
@@ -62,17 +57,24 @@ WEEKDAY_COUNTRY = {
     6: "GCC",
 }
 
-# Words that get highlighted in orange
+# Country visual identity for AI image prompts
+COUNTRY_VISUAL = {
+    "Saudi Arabia": "Riyadh skyline, Vision 2030 towers, desert gold tones, futuristic architecture",
+    "UAE":          "Dubai Marina skyline, Burj Khalifa, modern glass towers, blue and silver tones",
+    "Qatar":        "Doha corniche, pearl-shaped towers, warm amber desert light",
+    "Kuwait":       "Kuwait City skyline, Liberation Tower, Arabian Gulf waterfront",
+    "Oman":         "Muscat mountains, Sultan Qaboos Grand Mosque, warm terracotta tones",
+    "Bahrain":      "Manama financial district, World Trade Center towers, sea reflections",
+    "GCC":          "MENA region panoramic skyline, Arabian Gulf, diverse modern architecture",
+}
+
 HIGHLIGHT_WORDS = {
-    # money
     "million","billion","trillion","fund","funding","raises","raised",
     "invest","investment","valuation","deal","unicorn","ipo","series",
-    # geography
     "saudi","arabia","uae","qatar","kuwait","oman","bahrain","gcc",
     "mena","dubai","riyadh","abu","dhabi","doha","muscat","manama",
     "lebanese","lebanon","arab","emirati","khaleeji","jordanian",
     "egyptian","moroccan","tunisian","iraqi","yemeni","libyan",
-    # action
     "launches","launch","orders","ordered","wins","bans","ban",
     "lifts","lifted","builds","built","becomes","became","joins",
     "signs","acquires","expands","hits","secures","secured","closes",
@@ -81,7 +83,7 @@ HIGHLIGHT_WORDS = {
 }
 
 
-# ── FONT HELPERS ─────────────────────────────────────────────────────────────
+# ── FONT / DRAW HELPERS ───────────────────────────────────────────────────────
 
 def get_font(path, size):
     try:
@@ -96,22 +98,18 @@ def measure(draw, text, font):
 
 
 def word_color(word):
-    """Orange for key words, black for the rest."""
     clean = word.lower().strip(".,!?:;\"'()[]%#@")
     if clean.startswith("$") or (any(c.isdigit() for c in clean) and any(c.isalpha() for c in clean)):
         return ORANGE
     if clean in HIGHLIGHT_WORDS:
         return ORANGE
-    # ALL-CAPS acronyms (e.g. MBS, GCC, IPO)
     if word.isupper() and len(word) >= 2 and word.isalpha():
         return ORANGE
     return BLACK
 
 
 def wrap_words(draw, words, font, max_w):
-    """Greedy line-wrap; never puts a single orphan word alone if avoidable."""
     lines, cur = [], []
-    sp_w, _ = measure(draw, " ", font)
     for word in words:
         test = cur + [word]
         w, _ = measure(draw, " ".join(test), font)
@@ -122,17 +120,14 @@ def wrap_words(draw, words, font, max_w):
             cur = [word]
     if cur:
         lines.append(cur)
-
-    # Fix orphan: if last line has 1 word and 2nd-to-last has ≥ 3 words, rebalance
+    # Fix orphan last word
     if len(lines) >= 2 and len(lines[-1]) == 1 and len(lines[-2]) >= 3:
         moved = lines[-2].pop()
         lines[-1].insert(0, moved)
-
     return lines
 
 
-def auto_fit(draw, headline, max_w, max_h, start=90, minimum=36):
-    """Find largest font size where wrapped text fits within max_h."""
+def auto_fit(draw, headline, max_w, max_h, start=90, minimum=34):
     words = headline.split()
     for size in range(start, minimum - 1, -2):
         font   = get_font(FONT_BOLD, size)
@@ -142,25 +137,195 @@ def auto_fit(draw, headline, max_w, max_h, start=90, minimum=36):
             return font, lines, size, line_h
     font   = get_font(FONT_BOLD, minimum)
     lines  = wrap_words(draw, words, font, max_w)
-    line_h = int(minimum * 1.28)
-    return font, lines, minimum, line_h
+    return font, lines, minimum, int(minimum * 1.28)
 
 
 def draw_colored_line(draw, word_list, font, x, y):
-    """Draw one line left-aligned with per-word colors."""
     sp_w, _ = measure(draw, " ", font)
     cx = x
     for word in word_list:
-        color = word_color(word)
-        draw.text((cx, y), word, font=font, fill=color)
+        draw.text((cx, y), word, font=font, fill=word_color(word))
         w, _ = measure(draw, word, font)
         cx += w + sp_w
 
 
-# ── BACKGROUND HELPERS ───────────────────────────────────────────────────────
+# ── AI IMAGE GENERATION ───────────────────────────────────────────────────────
+
+def build_image_prompt(title: str, summary: str, country_name: str) -> str:
+    """
+    Use Groq (or Gemini text) to craft a detailed, vivid image generation prompt
+    based on the article content and country visual identity.
+    """
+    country_visual = COUNTRY_VISUAL.get(country_name, "modern Middle East city, business district")
+
+    meta_prompt = (
+        f"You are creating a background image prompt for a LinkedIn post about this article:\n"
+        f"Title: {title}\n"
+        f"Summary: {summary or 'No summary available.'}\n"
+        f"Country: {country_name}\n\n"
+        f"Write a single vivid, detailed image generation prompt (max 120 words) for a "
+        f"photorealistic editorial-style background image.\n\n"
+        f"Rules:\n"
+        f"- The image must feel professional, journalistic, and relevant to the article topic\n"
+        f"- Incorporate this country's visual identity: {country_visual}\n"
+        f"- No text, no logos, no overlays, no watermarks in the image\n"
+        f"- Cinematic lighting, sharp focus, high detail\n"
+        f"- Style: editorial photography, wide establishing shot or dramatic close-up\n"
+        f"- If the article is about funding/investment: show a business handshake, modern boardroom, "
+        f"or financial district at golden hour\n"
+        f"- If about a startup/tech: show a modern coworking space, tech campus, or futuristic cityscape\n"
+        f"- If about government/policy: show government buildings, official ceremony, or city skyline\n"
+        f"- Output ONLY the image prompt, no preamble, no quotes, no explanation."
+    )
+
+    print("🧠 Generating AI image prompt…")
+    try:
+        return generate_with_groq(meta_prompt)
+    except Exception:
+        try:
+            return generate_text_with_gemini(meta_prompt)
+        except Exception:
+            # Hard fallback prompt
+            return (
+                f"Photorealistic editorial photograph, {country_visual}, "
+                f"cinematic golden hour lighting, sharp focus, wide establishing shot, "
+                f"professional business atmosphere, no text, no logos"
+            )
+
+
+def generate_image_with_gemini(prompt: str) -> bytes:
+    """
+    Try to generate an image using Gemini image generation models.
+    Tries 3 keys × 2 models = up to 6 attempts before giving up.
+    Returns raw image bytes (JPEG/PNG) or raises RuntimeError.
+    """
+    if not GEMINI_KEYS:
+        raise RuntimeError("No Gemini API keys configured.")
+
+    # Model priority: imagen-3 is highest quality, flash-preview as fallback
+    models = [
+        {
+            "name":     "imagen-3.0-generate-002",
+            "endpoint": "https://us-central1-aiplatform.googleapis.com/v1/projects/{}/locations/us-central1/publishers/google/models/imagen-3.0-generate-002:predict",
+            "type":     "imagen",
+        },
+        {
+            "name":     "gemini-2.0-flash-preview-image-generation",
+            "endpoint": "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-preview-image-generation:generateContent?key={}",
+            "type":     "gemini_multimodal",
+        },
+    ]
+
+    for key_idx, key in enumerate(GEMINI_KEYS):
+        for model in models:
+            print(f"🎨 Trying {model['name']} with key {key_idx + 1}/{len(GEMINI_KEYS)}…")
+            try:
+                img_bytes = _call_gemini_image_model(model, key, prompt)
+                if img_bytes:
+                    print(f"✅ Image generated with {model['name']}")
+                    return img_bytes
+            except Exception as e:
+                print(f"   ⚠️  {model['name']} key {key_idx+1} failed: {e}")
+                if "429" in str(e) or "quota" in str(e).lower():
+                    time.sleep(10)
+                continue
+
+    raise RuntimeError("All Gemini image generation attempts exhausted.")
+
+
+def _call_gemini_image_model(model: dict, key: str, prompt: str) -> bytes:
+    """Call one specific Gemini image model. Returns image bytes or raises."""
+
+    if model["type"] == "gemini_multimodal":
+        # gemini-2.0-flash-preview-image-generation
+        url = model["endpoint"].format(key)
+        payload = {
+            "contents": [{"parts": [{"text": prompt}]}],
+            "generationConfig": {"responseModalities": ["IMAGE"]},
+        }
+        r = requests.post(url, json=payload, timeout=60)
+        if r.status_code != 200:
+            raise RuntimeError(f"HTTP {r.status_code}: {r.text[:300]}")
+        data = r.json()
+        # Response: candidates[0].content.parts[].inlineData.data (base64)
+        for candidate in data.get("candidates", []):
+            for part in candidate.get("content", {}).get("parts", []):
+                inline = part.get("inlineData", {})
+                if inline.get("data"):
+                    return base64.b64decode(inline["data"])
+        raise RuntimeError(f"No image in response: {str(data)[:300]}")
+
+    elif model["type"] == "imagen":
+        # imagen-3.0-generate-002 uses a different endpoint + auth
+        # For API key auth (not OAuth), use the generativelanguage endpoint
+        url = (
+            f"https://generativelanguage.googleapis.com/v1beta/"
+            f"models/imagen-3.0-generate-002:predict?key={key}"
+        )
+        payload = {
+            "instances": [{"prompt": prompt}],
+            "parameters": {
+                "sampleCount":   1,
+                "aspectRatio":   "1:1",
+                "safetyFilterLevel": "block_few",
+                "personGeneration": "allow_adult",
+            },
+        }
+        r = requests.post(url, json=payload, timeout=60)
+        if r.status_code != 200:
+            raise RuntimeError(f"HTTP {r.status_code}: {r.text[:300]}")
+        data = r.json()
+        # Response: predictions[0].bytesBase64Encoded
+        preds = data.get("predictions", [])
+        if preds and preds[0].get("bytesBase64Encoded"):
+            return base64.b64decode(preds[0]["bytesBase64Encoded"])
+        raise RuntimeError(f"No image in response: {str(data)[:300]}")
+
+    raise RuntimeError(f"Unknown model type: {model['type']}")
+
+
+def get_background_image(source_url: str, title: str, summary: str, country_name: str):
+    """
+    Returns image bytes for the post background.
+    Priority:
+      1. og:image from the article URL
+      2. AI-generated image from Gemini (using article content as prompt)
+      3. None (caller falls back to gradient)
+    """
+    # ── Step 1: Try og:image ──
+    og_bytes = fetch_og_image_bytes(source_url)
+    if og_bytes:
+        print("✅ Using og:image as background.")
+        return og_bytes, "og_image"
+
+    print("ℹ️  No og:image found. Generating AI background image…")
+
+    # ── Step 2: Build smart prompt then generate ──
+    try:
+        img_prompt = build_image_prompt(title, summary, country_name)
+        print(f"📝 Image prompt: {img_prompt[:120]}…")
+        ai_bytes = generate_image_with_gemini(img_prompt)
+        return ai_bytes, "ai_generated"
+    except Exception as e:
+        print(f"⚠️  AI image generation failed: {e}")
+        print("ℹ️  Falling back to gradient background.")
+        return None, "gradient"
+
+
+# ── GRADIENT FALLBACK ─────────────────────────────────────────────────────────
+
+COUNTRY_GRADIENTS = {
+    "Saudi Arabia": ((0,  80,  40),  (0,  30, 15)),
+    "UAE":          ((0,  55, 110),  (0,  20, 60)),
+    "Qatar":        ((75,  0,  40),  (35,  0, 18)),
+    "Kuwait":       ((80, 58,   0),  (35, 25,  0)),
+    "Oman":         ((60, 18,   0),  (28,  8,  0)),
+    "Bahrain":      ((0,  38, 100),  (0,  15, 55)),
+    "GCC":          ((18, 18,  60),  (5,   5, 28)),
+}
+
 
 def make_gradient_bg(country_name):
-    """Solid dark gradient when no article photo is available."""
     top, bot = COUNTRY_GRADIENTS.get(country_name, ((18, 18, 60), (5, 5, 28)))
     img = Image.new("RGB", (IMG_W, IMG_H))
     px  = img.load()
@@ -175,7 +340,6 @@ def make_gradient_bg(country_name):
 
 
 def prepare_background(img_bytes, country_name):
-    """Load image bytes → centre-crop to 1080×1080, or gradient fallback."""
     if img_bytes:
         try:
             base = Image.open(io.BytesIO(img_bytes)).convert("RGB")
@@ -187,29 +351,30 @@ def prepare_background(img_bytes, country_name):
             base  = base.resize((IMG_W, IMG_H), Image.LANCZOS)
             return base
         except Exception as e:
-            print(f"⚠️  Background image decode failed: {e}")
+            print(f"⚠️  Background decode failed: {e}")
     return make_gradient_bg(country_name)
 
 
-# ── BRANDED IMAGE GENERATOR ──────────────────────────────────────────────────
+# ── BRANDED IMAGE COMPOSER ───────────────────────────────────────────────────
 
 def generate_branded_image(bg_bytes, headline, country_name, logo_bytes=None):
     """
-    Returns a PIL Image (1080×1080) styled like Smashi Business posts:
-      - Full-bleed photo (or gradient) background
-      - White rounded-rectangle card at bottom with auto-fitting headline
-      - Per-word orange highlighting for key terms
+    Compose final 1080×1080 branded image:
+      - Full-bleed background (AI photo or gradient)
+      - Vignette fade at bottom
+      - White rounded card with auto-fitting headline text
+      - Per-word orange highlights
       - Country code pill top-left, logo top-right
       - Blue accent bar at card bottom
     """
     base = prepare_background(bg_bytes, country_name)
 
-    # Vignette: subtle dark fade on lower third so card floats cleanly
+    # Vignette
     vignette = Image.new("RGBA", (IMG_W, IMG_H), (0, 0, 0, 0))
     vd = ImageDraw.Draw(vignette)
-    VIGN_H = 360
+    VIGN_H = 380
     for i in range(VIGN_H):
-        alpha = int((i / VIGN_H) ** 1.9 * 170)
+        alpha = int((i / VIGN_H) ** 1.9 * 175)
         vd.rectangle(
             [(0, IMG_H - VIGN_H + i), (IMG_W, IMG_H - VIGN_H + i + 1)],
             fill=(0, 0, 0, alpha)
@@ -217,18 +382,17 @@ def generate_branded_image(bg_bytes, headline, country_name, logo_bytes=None):
     base = Image.alpha_composite(base.convert("RGBA"), vignette).convert("RGB")
     draw = ImageDraw.Draw(base)
 
-    # ── Card layout constants ──
-    MARGIN   = 28
-    PAD_X    = 40
-    PAD_TOP  = 36
-    PAD_BOT  = 28
-    BLUE_H   = 8
-    CARD_X   = MARGIN
-    CARD_W   = IMG_W - 2 * MARGIN
-    TEXT_W   = CARD_W - 2 * PAD_X
-    MAX_TEXT_H = int(IMG_H * 0.42)   # headline block ≤ 42% of image height
+    # Card layout
+    MARGIN    = 28
+    PAD_X     = 40
+    PAD_TOP   = 36
+    PAD_BOT   = 28
+    BLUE_H    = 8
+    CARD_X    = MARGIN
+    CARD_W    = IMG_W - 2 * MARGIN
+    TEXT_W    = CARD_W - 2 * PAD_X
+    MAX_TEXT_H = int(IMG_H * 0.42)
 
-    # ── Auto-fit headline ──
     font, lines, fsize, line_h = auto_fit(
         draw, headline, TEXT_W, MAX_TEXT_H, start=90, minimum=34
     )
@@ -236,60 +400,47 @@ def generate_branded_image(bg_bytes, headline, country_name, logo_bytes=None):
     card_h       = PAD_TOP + text_block_h + PAD_BOT + BLUE_H
     card_y       = IMG_H - MARGIN - card_h
 
-    # ── White card ──
+    # White card
     draw.rounded_rectangle(
         [CARD_X, card_y, CARD_X + CARD_W, card_y + card_h],
         radius=20, fill=WHITE
     )
-
-    # Blue accent bar at card bottom (flush bottom of card)
+    # Blue bar at bottom of card
     bar_top = card_y + card_h - BLUE_H
-    draw.rectangle(
-        [CARD_X + 20, bar_top, CARD_X + CARD_W - 20, card_y + card_h],
-        fill=BLUE_LINE
-    )
-    # Round the outer bottom corners to match the card
     draw.rounded_rectangle(
         [CARD_X, bar_top - 1, CARD_X + CARD_W, card_y + card_h],
         radius=20, fill=BLUE_LINE
     )
-    # Re-draw white above to keep bar height exact
     draw.rectangle(
         [CARD_X + 1, card_y, CARD_X + CARD_W - 1, bar_top],
         fill=WHITE
     )
 
-    # ── Headline text ──
+    # Headline
     ty = card_y + PAD_TOP - 4
     for word_list in lines:
         draw_colored_line(draw, word_list, font, CARD_X + PAD_X, ty)
         ty += line_h
 
-    # ── Country code pill — top left ──
+    # Country code pill — top left
     country_code = COUNTRY_MAP.get(country_name, {}).get("code", country_name[:3].upper())
+    code_font    = get_font(FONT_BOLD, 21)
+    cw, ch       = measure(draw, country_code, code_font)
     pill_x, pill_y = 22, 22
-    code_font = get_font(FONT_BOLD, 21)
-    cw, ch    = measure(draw, country_code, code_font)
-    pill_w    = cw + 28
-    pill_h    = ch + 20
+    pill_w, pill_h = cw + 28, ch + 20
     draw.rounded_rectangle(
         [pill_x, pill_y, pill_x + pill_w, pill_y + pill_h],
         radius=10, fill=WHITE
     )
-    draw.text(
-        (pill_x + 14, pill_y + 10),
-        country_code, font=code_font, fill=(20, 20, 80)
-    )
+    draw.text((pill_x + 14, pill_y + 10), country_code, font=code_font, fill=(20, 20, 80))
 
-    # ── Logo — top right ──
+    # Logo — top right
     if logo_bytes:
         try:
             logo      = Image.open(io.BytesIO(logo_bytes)).convert("RGBA")
             logo_size = 106
             logo      = logo.resize((logo_size, logo_size), Image.LANCZOS)
-            lx        = IMG_W - logo_size - 18
-            ly        = 14
-            base.paste(logo, (lx, ly), logo)
+            base.paste(logo, (IMG_W - logo_size - 18, 14), logo)
         except Exception as e:
             print(f"⚠️  Logo paste error: {e}")
 
@@ -308,7 +459,7 @@ def upload_image_to_github(img: Image.Image, filename: str) -> str:
         "Authorization": f"token {GITHUB_TOKEN}",
         "Accept":        "application/vnd.github.v3+json",
     }
-    sha  = None
+    sha   = None
     check = requests.get(api_url, headers=headers)
     if check.status_code == 200:
         sha = check.json().get("sha")
@@ -329,10 +480,9 @@ def upload_image_to_github(img: Image.Image, filename: str) -> str:
     raise RuntimeError(f"GitHub upload failed {res.status_code}: {res.text}")
 
 
-# ── OG IMAGE FETCHER ─────────────────────────────────────────────────────────
+# ── OG IMAGE ─────────────────────────────────────────────────────────────────
 
 def fetch_og_image_bytes(url: str):
-    """Return bytes of og:image from article URL, or None."""
     if not url:
         return None
     try:
@@ -355,7 +505,7 @@ def fetch_og_image_bytes(url: str):
         if not parser.og_image:
             return None
 
-        print(f"✅ og:image found: {parser.og_image}")
+        print(f"✅ og:image: {parser.og_image}")
         img_res = requests.get(parser.og_image, timeout=10, headers={"User-Agent": "Mozilla/5.0"})
         if img_res.status_code == 200:
             return img_res.content
@@ -364,7 +514,7 @@ def fetch_og_image_bytes(url: str):
     return None
 
 
-# ── DATABASE ──────────────────────────────────────────────────────────────────
+# ── DATABASE ─────────────────────────────────────────────────────────────────
 
 def get_country_for_today() -> str:
     return WEEKDAY_COUNTRY.get(datetime.now(timezone.utc).weekday(), "GCC")
@@ -441,7 +591,7 @@ def fetch_live_article(country_name: str):
     return None, None, None
 
 
-# ── AI POST GENERATION ────────────────────────────────────────────────────────
+# ── AI TEXT GENERATION ────────────────────────────────────────────────────────
 
 def generate_with_groq(prompt: str) -> str:
     if not GROQ_API_KEY:
@@ -449,8 +599,8 @@ def generate_with_groq(prompt: str) -> str:
     url     = "https://api.groq.com/openai/v1/chat/completions"
     headers = {"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"}
     payload = {
-        "model":    "llama-3.3-70b-versatile",
-        "messages": [{"role": "user", "content": prompt}],
+        "model":       "llama-3.3-70b-versatile",
+        "messages":    [{"role": "user", "content": prompt}],
         "temperature": 0.7,
     }
     for attempt in range(3):
@@ -459,9 +609,7 @@ def generate_with_groq(prompt: str) -> str:
             if r.status_code == 200:
                 return r.json()["choices"][0]["message"]["content"].strip()
             elif r.status_code in [429, 503]:
-                wait = 15 * (attempt + 1)
-                print(f"   [Groq {attempt+1}/3] {r.status_code} — retry in {wait}s…")
-                time.sleep(wait)
+                time.sleep(15 * (attempt + 1))
             else:
                 raise RuntimeError(f"Groq {r.status_code}: {r.text}")
         except requests.exceptions.RequestException as e:
@@ -469,16 +617,11 @@ def generate_with_groq(prompt: str) -> str:
     raise RuntimeError("Groq exhausted retries.")
 
 
-def generate_with_gemini(prompt: str) -> str:
-    keys = [k for k in [
-        os.environ.get("GEMINI_API_KEY"),
-        os.environ.get("GEMINI_API_KEY_BACKUP1"),
-        os.environ.get("GEMINI_API_KEY_BACKUP2"),
-    ] if k]
-    if not keys:
-        raise ValueError("No GEMINI_API_KEY found.")
+def generate_text_with_gemini(prompt: str) -> str:
+    if not GEMINI_KEYS:
+        raise ValueError("No Gemini keys.")
     payload = {"contents": [{"parts": [{"text": prompt}]}]}
-    for i, key in enumerate(keys):
+    for i, key in enumerate(GEMINI_KEYS):
         url = (
             f"https://generativelanguage.googleapis.com/v1beta/"
             f"models/gemini-2.0-flash:generateContent?key={key}"
@@ -490,17 +633,14 @@ def generate_with_gemini(prompt: str) -> str:
                     return r.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
                 elif r.status_code in [429, 503]:
                     if attempt < 2:
-                        wait = 35 * (attempt + 1)
-                        print(f"   [Gemini key {i+1} attempt {attempt+1}] {r.status_code} — retry in {wait}s…")
-                        time.sleep(wait)
+                        time.sleep(35 * (attempt + 1))
                     else:
-                        print(f"   [Gemini key {i+1}] rate-limited, trying next key…")
                         break
                 else:
                     raise RuntimeError(f"Gemini {r.status_code}: {r.text}")
-            except requests.exceptions.RequestException as e:
+            except requests.exceptions.RequestException:
                 time.sleep(35 * (attempt + 1))
-    raise RuntimeError("Gemini exhausted all keys and retries.")
+    raise RuntimeError("Gemini text exhausted.")
 
 
 def generate_post_content(title: str, summary: str, source_url: str) -> str:
@@ -524,7 +664,7 @@ def generate_post_content(title: str, summary: str, source_url: str) -> str:
     except Exception as e:
         print(f"⚠️  Groq failed: {e}. Falling back to Gemini…")
         try:
-            return generate_with_gemini(prompt)
+            return generate_text_with_gemini(prompt)
         except Exception as e2:
             print(f"❌ Both AI engines failed: {e2}")
             sys.exit(1)
@@ -538,7 +678,7 @@ def main():
     flag         = country_data["flag"]
     print(f"📅 Today: {country_name} {flag}")
 
-    # 1. Get article from DB (or live fallback)
+    # 1. Get article
     article    = get_daily_article(country_name)
     article_id = None
     if not article:
@@ -559,7 +699,7 @@ def main():
         source_url or "",
     )
 
-    # 3. Build image headline (emoji prefix + title)
+    # 3. Build image headline
     title_lower  = (db_title or "").lower()
     emoji_prefix = (
         "💰" if any(w in title_lower for w in ["fund","million","billion","invest","raise","raises"]) else
@@ -569,15 +709,14 @@ def main():
         "🌍"
     )
     image_headline = f"{emoji_prefix} {(db_title or '').strip()}" if db_title else post_text.split("\n")[0][:100]
-    print(f"🖼  Image headline: {image_headline}")
 
-    # 4. Fetch og:image from article URL (bytes, not URL string)
-    print("🔍 Fetching article og:image…")
-    bg_bytes = fetch_og_image_bytes(source_url)
-    if not bg_bytes:
-        print("ℹ️  No og:image found — using country gradient background.")
+    # 4. Get background: og:image → AI-generated → gradient
+    bg_bytes, bg_source = get_background_image(
+        source_url, db_title or "", summary or "", country_name
+    )
+    print(f"🖼  Background source: {bg_source}")
 
-    # 5. Fetch logo bytes from GitHub
+    # 5. Fetch logo
     logo_bytes = None
     try:
         lr         = requests.get(f"{GITHUB_BASE}logo.jpg", timeout=10)
@@ -585,8 +724,8 @@ def main():
     except Exception as e:
         print(f"⚠️  Logo fetch failed: {e}")
 
-    # 6. Generate branded image
-    print("🎨 Generating branded image…")
+    # 6. Compose branded image
+    print("🎨 Composing branded image…")
     branded_img = generate_branded_image(bg_bytes, image_headline, country_name, logo_bytes)
 
     # 7. Upload to GitHub
@@ -596,7 +735,7 @@ def main():
     # 8. Send to Make.com
     payload = {
         "text":          post_text,
-        "url":           "",          # no link preview — image IS the post
+        "url":           "",
         "title":         "",
         "thumbnail_url": thumbnail_url,
         "country":       country_name,
