@@ -396,23 +396,23 @@ def prepare_background(img_bytes, country_name):
 
 def generate_branded_image(bg_bytes, headline, country_name, logo_bytes=None):
     """
-    Compose final 1080×1080 branded image:
+    Compose final 1080×1080 branded image (Smashi Business style):
       - Full-bleed dark background (AI photo or country gradient)
-      - Vignette fade at bottom
-      - White rounded card with auto-fitting headline (min 52px font)
-      - Per-word orange highlights on key terms
-      - Thin drop-shadow border around card so it pops on any background
+      - Heavy vignette fade at bottom so card always contrasts
+      - White card with LARGE auto-fitting headline (min 58px, start 96px)
+      - Card height auto-expands to fit text — never clips
+      - Per-word orange highlights on key terms (Smashi style)
+      - Thick blue accent bar at card bottom
       - Country code pill top-left, logo top-right
-      - Blue accent bar at card bottom
     """
     base = prepare_background(bg_bytes, country_name)
 
-    # Vignette — strong enough to darken any real photo bottom
+    # Vignette — heavy at bottom so card always pops over any photo
     vignette = Image.new("RGBA", (IMG_W, IMG_H), (0, 0, 0, 0))
     vd = ImageDraw.Draw(vignette)
-    VIGN_H = 420
+    VIGN_H = 500
     for i in range(VIGN_H):
-        alpha = int((i / VIGN_H) ** 1.7 * 200)
+        alpha = int((i / VIGN_H) ** 1.5 * 230)
         vd.rectangle(
             [(0, IMG_H - VIGN_H + i), (IMG_W, IMG_H - VIGN_H + i + 1)],
             fill=(0, 0, 0, alpha)
@@ -421,43 +421,44 @@ def generate_branded_image(bg_bytes, headline, country_name, logo_bytes=None):
     draw = ImageDraw.Draw(base)
 
     # ── Card layout constants ──
-    MARGIN     = 28
-    PAD_X      = 44
-    PAD_TOP    = 40
-    PAD_BOT    = 32
-    BLUE_H     = 8
+    MARGIN     = 28           # gap from image edges
+    PAD_X      = 52           # horizontal text padding inside card
+    PAD_TOP    = 48           # top padding inside card
+    PAD_BOT    = 42           # bottom padding inside card (above blue bar)
+    BLUE_H     = 12           # thick Smashi-style blue accent bar
     CARD_X     = MARGIN
     CARD_W     = IMG_W - 2 * MARGIN
     TEXT_W     = CARD_W - 2 * PAD_X
-    # Allow card to use up to 52% of image height — gives plenty of room
-    # but hard-floor on font size is 52px so text is always legible
-    MAX_TEXT_H = int(IMG_H * 0.52)
-    MIN_FONT   = 52   # never go below this — Anara-style long titles still readable
+
+    # Font sizing: start large (96), never go below 58px — always legible
+    # Max text block uses up to 48% of image height
+    MAX_TEXT_H = int(IMG_H * 0.48)
+    MIN_FONT   = 58
 
     font, lines, fsize, line_h = auto_fit(
-        draw, headline, TEXT_W, MAX_TEXT_H, start=90, minimum=MIN_FONT
+        draw, headline, TEXT_W, MAX_TEXT_H, start=96, minimum=MIN_FONT
     )
+
+    # Card height is fully driven by text content — auto-expands for long titles
     text_block_h = len(lines) * line_h
     card_h       = PAD_TOP + text_block_h + PAD_BOT + BLUE_H
     card_y       = IMG_H - MARGIN - card_h
 
-    # ── Card shadow (thin dark border offset) for contrast on any background ──
-    SHADOW_OFFSET = 4
-    SHADOW_BLUR   = 3
-    for blur in range(SHADOW_BLUR, 0, -1):
-        alpha_val = 60 + (SHADOW_BLUR - blur) * 30
+    # Safety: if card would clip off the top, push it down slightly
+    if card_y < MARGIN + 140:   # leave room for logo/pill
+        card_y = MARGIN + 140
+
+    # ── Card shadow ──
+    for blur in range(5, 0, -1):
         draw.rounded_rectangle(
-            [CARD_X + SHADOW_OFFSET - blur,
-             card_y + SHADOW_OFFSET - blur,
-             CARD_X + CARD_W + SHADOW_OFFSET + blur,
-             card_y + card_h + SHADOW_OFFSET + blur],
-            radius=22,
-            fill=(0, 0, 0, alpha_val) if False else (0, 0, 0)   # Pillow fill is RGB
+            [CARD_X + blur, card_y + blur,
+             CARD_X + CARD_W + blur, card_y + card_h + blur],
+            radius=22, fill=(0, 0, 0)
         )
-    # Solid thin dark border around card
+    # Solid dark border around card for contrast on any background
     draw.rounded_rectangle(
         [CARD_X - 2, card_y - 2, CARD_X + CARD_W + 2, card_y + card_h + 2],
-        radius=22, fill=(30, 30, 30)
+        radius=22, fill=(20, 20, 20)
     )
 
     # ── White card ──
@@ -466,46 +467,47 @@ def generate_branded_image(bg_bytes, headline, country_name, logo_bytes=None):
         radius=20, fill=WHITE
     )
 
-    # ── Blue accent bar at bottom of card ──
+    # ── Blue accent bar at bottom of card (Smashi style thick bar) ──
     bar_top = card_y + card_h - BLUE_H
     draw.rounded_rectangle(
-        [CARD_X, bar_top - 1, CARD_X + CARD_W, card_y + card_h],
+        [CARD_X, bar_top, CARD_X + CARD_W, card_y + card_h],
         radius=20, fill=BLUE_LINE
     )
-    # Re-draw white above bar to keep it clean
+    # Clean white rectangle above bar (prevents radius bleed)
     draw.rectangle(
-        [CARD_X + 1, card_y, CARD_X + CARD_W - 1, bar_top],
+        [CARD_X + 1, card_y + 1, CARD_X + CARD_W - 1, bar_top],
         fill=WHITE
     )
 
-    # ── Headline text ──
-    ty = card_y + PAD_TOP - 4
+    # ── Headline text — centred vertically in the white area ──
+    text_area_h = card_h - BLUE_H
+    text_start_y = card_y + (text_area_h - text_block_h) // 2
+    ty = text_start_y
     for word_list in lines:
         draw_colored_line(draw, word_list, font, CARD_X + PAD_X, ty)
         ty += line_h
 
     # ── Country code pill — top left ──
     country_code = COUNTRY_MAP.get(country_name, {}).get("code", country_name[:3].upper())
-    code_font    = get_font(FONT_BOLD, 22)
+    code_font    = get_font(FONT_BOLD, 26)
     cw, ch       = measure(draw, country_code, code_font)
     pill_x, pill_y = 22, 22
-    pill_w, pill_h = cw + 30, ch + 22
-    # Dark border on pill too so it shows on light og:images if ever used
+    pill_w, pill_h = cw + 36, ch + 24
     draw.rounded_rectangle(
         [pill_x - 2, pill_y - 2, pill_x + pill_w + 2, pill_y + pill_h + 2],
-        radius=12, fill=(30, 30, 30)
+        radius=14, fill=(20, 20, 20)
     )
     draw.rounded_rectangle(
         [pill_x, pill_y, pill_x + pill_w, pill_y + pill_h],
-        radius=10, fill=WHITE
+        radius=12, fill=WHITE
     )
-    draw.text((pill_x + 15, pill_y + 11), country_code, font=code_font, fill=(20, 20, 80))
+    draw.text((pill_x + 18, pill_y + 12), country_code, font=code_font, fill=(20, 20, 80))
 
     # ── Logo — top right ──
     if logo_bytes:
         try:
             logo      = Image.open(io.BytesIO(logo_bytes)).convert("RGBA")
-            logo_size = 106
+            logo_size = 110
             logo      = logo.resize((logo_size, logo_size), Image.LANCZOS)
             base.paste(logo, (IMG_W - logo_size - 18, 14), logo)
         except Exception as e:
