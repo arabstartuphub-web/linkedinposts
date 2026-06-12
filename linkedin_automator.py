@@ -284,27 +284,64 @@ def _call_gemini_image_model(model: dict, key: str, prompt: str) -> bytes:
     raise RuntimeError(f"Unknown model type: {model['type']}")
 
 
+def is_image_too_light(img: Image.Image, threshold: int = 195, light_fraction: float = 0.55) -> bool:
+    """
+    Returns True if the image is predominantly light/white.
+    Uses perceptual luminance, weights the bottom half 2× (where the card sits).
+    """
+    small = img.resize((40, 40), Image.LANCZOS).convert("RGB")
+    w, h  = small.size
+    total = 0
+    light = 0
+    for y in range(h):
+        weight = 2 if y > h // 2 else 1
+        for x in range(w):
+            r, g, b   = small.getpixel((x, y))
+            luminance = (r * 299 + g * 587 + b * 114) // 1000
+            total    += weight
+            if luminance > threshold:
+                light += weight
+    ratio = light / total
+    print(f"  Background brightness ratio: {ratio:.2f} ({'too light — skipping' if ratio > light_fraction else 'OK'})")
+    return ratio > light_fraction
+
+
 def get_background_image(source_url: str, title: str, summary: str, country_name: str):
     """
-    Returns image bytes for the post background.
+    Returns (image_bytes_or_None, source_label).
     Priority:
-      1. og:image from the article URL
-      2. AI-generated image from Gemini (using article content as prompt)
-      3. None (caller falls back to gradient)
+      1. og:image — only if it is dark enough to work as a background
+      2. AI-generated image via Gemini (all 3 keys × 2 models)
+      3. None → caller uses gradient fallback
     """
-    # ── Step 1: Try og:image ──
+    # ── Step 1: Try og:image, reject if too light ──
     og_bytes = fetch_og_image_bytes(source_url)
     if og_bytes:
-        print("✅ Using og:image as background.")
-        return og_bytes, "og_image"
+        try:
+            og_img = Image.open(io.BytesIO(og_bytes)).convert("RGB")
+            if not is_image_too_light(og_img):
+                print("✅ Using og:image as background.")
+                return og_bytes, "og_image"
+            else:
+                print("⚠️  og:image is too light/white — ignoring it, generating AI image instead.")
+        except Exception as e:
+            print(f"⚠️  og:image decode check failed: {e}")
 
-    print("ℹ️  No og:image found. Generating AI background image…")
+    print("🎨 Generating AI background image…")
 
-    # ── Step 2: Build smart prompt then generate ──
+    # ── Step 2: AI-generated image ──
     try:
         img_prompt = build_image_prompt(title, summary, country_name)
         print(f"📝 Image prompt: {img_prompt[:120]}…")
         ai_bytes = generate_image_with_gemini(img_prompt)
+        # Safety-check the AI image too (extremely unlikely to be white, but just in case)
+        try:
+            ai_img = Image.open(io.BytesIO(ai_bytes)).convert("RGB")
+            if is_image_too_light(ai_img):
+                print("⚠️  AI image also too light — falling back to gradient.")
+                return None, "gradient"
+        except Exception:
+            pass
         return ai_bytes, "ai_generated"
     except Exception as e:
         print(f"⚠️  AI image generation failed: {e}")
@@ -360,21 +397,22 @@ def prepare_background(img_bytes, country_name):
 def generate_branded_image(bg_bytes, headline, country_name, logo_bytes=None):
     """
     Compose final 1080×1080 branded image:
-      - Full-bleed background (AI photo or gradient)
+      - Full-bleed dark background (AI photo or country gradient)
       - Vignette fade at bottom
-      - White rounded card with auto-fitting headline text
-      - Per-word orange highlights
+      - White rounded card with auto-fitting headline (min 52px font)
+      - Per-word orange highlights on key terms
+      - Thin drop-shadow border around card so it pops on any background
       - Country code pill top-left, logo top-right
       - Blue accent bar at card bottom
     """
     base = prepare_background(bg_bytes, country_name)
 
-    # Vignette
+    # Vignette — strong enough to darken any real photo bottom
     vignette = Image.new("RGBA", (IMG_W, IMG_H), (0, 0, 0, 0))
     vd = ImageDraw.Draw(vignette)
-    VIGN_H = 380
+    VIGN_H = 420
     for i in range(VIGN_H):
-        alpha = int((i / VIGN_H) ** 1.9 * 175)
+        alpha = int((i / VIGN_H) ** 1.7 * 200)
         vd.rectangle(
             [(0, IMG_H - VIGN_H + i), (IMG_W, IMG_H - VIGN_H + i + 1)],
             fill=(0, 0, 0, alpha)
@@ -382,59 +420,88 @@ def generate_branded_image(bg_bytes, headline, country_name, logo_bytes=None):
     base = Image.alpha_composite(base.convert("RGBA"), vignette).convert("RGB")
     draw = ImageDraw.Draw(base)
 
-    # Card layout
-    MARGIN    = 28
-    PAD_X     = 40
-    PAD_TOP   = 36
-    PAD_BOT   = 28
-    BLUE_H    = 8
-    CARD_X    = MARGIN
-    CARD_W    = IMG_W - 2 * MARGIN
-    TEXT_W    = CARD_W - 2 * PAD_X
-    MAX_TEXT_H = int(IMG_H * 0.42)
+    # ── Card layout constants ──
+    MARGIN     = 28
+    PAD_X      = 44
+    PAD_TOP    = 40
+    PAD_BOT    = 32
+    BLUE_H     = 8
+    CARD_X     = MARGIN
+    CARD_W     = IMG_W - 2 * MARGIN
+    TEXT_W     = CARD_W - 2 * PAD_X
+    # Allow card to use up to 52% of image height — gives plenty of room
+    # but hard-floor on font size is 52px so text is always legible
+    MAX_TEXT_H = int(IMG_H * 0.52)
+    MIN_FONT   = 52   # never go below this — Anara-style long titles still readable
 
     font, lines, fsize, line_h = auto_fit(
-        draw, headline, TEXT_W, MAX_TEXT_H, start=90, minimum=34
+        draw, headline, TEXT_W, MAX_TEXT_H, start=90, minimum=MIN_FONT
     )
     text_block_h = len(lines) * line_h
     card_h       = PAD_TOP + text_block_h + PAD_BOT + BLUE_H
     card_y       = IMG_H - MARGIN - card_h
 
-    # White card
+    # ── Card shadow (thin dark border offset) for contrast on any background ──
+    SHADOW_OFFSET = 4
+    SHADOW_BLUR   = 3
+    for blur in range(SHADOW_BLUR, 0, -1):
+        alpha_val = 60 + (SHADOW_BLUR - blur) * 30
+        draw.rounded_rectangle(
+            [CARD_X + SHADOW_OFFSET - blur,
+             card_y + SHADOW_OFFSET - blur,
+             CARD_X + CARD_W + SHADOW_OFFSET + blur,
+             card_y + card_h + SHADOW_OFFSET + blur],
+            radius=22,
+            fill=(0, 0, 0, alpha_val) if False else (0, 0, 0)   # Pillow fill is RGB
+        )
+    # Solid thin dark border around card
+    draw.rounded_rectangle(
+        [CARD_X - 2, card_y - 2, CARD_X + CARD_W + 2, card_y + card_h + 2],
+        radius=22, fill=(30, 30, 30)
+    )
+
+    # ── White card ──
     draw.rounded_rectangle(
         [CARD_X, card_y, CARD_X + CARD_W, card_y + card_h],
         radius=20, fill=WHITE
     )
-    # Blue bar at bottom of card
+
+    # ── Blue accent bar at bottom of card ──
     bar_top = card_y + card_h - BLUE_H
     draw.rounded_rectangle(
         [CARD_X, bar_top - 1, CARD_X + CARD_W, card_y + card_h],
         radius=20, fill=BLUE_LINE
     )
+    # Re-draw white above bar to keep it clean
     draw.rectangle(
         [CARD_X + 1, card_y, CARD_X + CARD_W - 1, bar_top],
         fill=WHITE
     )
 
-    # Headline
+    # ── Headline text ──
     ty = card_y + PAD_TOP - 4
     for word_list in lines:
         draw_colored_line(draw, word_list, font, CARD_X + PAD_X, ty)
         ty += line_h
 
-    # Country code pill — top left
+    # ── Country code pill — top left ──
     country_code = COUNTRY_MAP.get(country_name, {}).get("code", country_name[:3].upper())
-    code_font    = get_font(FONT_BOLD, 21)
+    code_font    = get_font(FONT_BOLD, 22)
     cw, ch       = measure(draw, country_code, code_font)
     pill_x, pill_y = 22, 22
-    pill_w, pill_h = cw + 28, ch + 20
+    pill_w, pill_h = cw + 30, ch + 22
+    # Dark border on pill too so it shows on light og:images if ever used
+    draw.rounded_rectangle(
+        [pill_x - 2, pill_y - 2, pill_x + pill_w + 2, pill_y + pill_h + 2],
+        radius=12, fill=(30, 30, 30)
+    )
     draw.rounded_rectangle(
         [pill_x, pill_y, pill_x + pill_w, pill_y + pill_h],
         radius=10, fill=WHITE
     )
-    draw.text((pill_x + 14, pill_y + 10), country_code, font=code_font, fill=(20, 20, 80))
+    draw.text((pill_x + 15, pill_y + 11), country_code, font=code_font, fill=(20, 20, 80))
 
-    # Logo — top right
+    # ── Logo — top right ──
     if logo_bytes:
         try:
             logo      = Image.open(io.BytesIO(logo_bytes)).convert("RGBA")
