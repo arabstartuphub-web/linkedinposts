@@ -32,6 +32,39 @@ IMG_W, IMG_H = 1080, 1080
 FONT_BOLD   = "/usr/share/fonts/truetype/google-fonts/Poppins-Bold.ttf"
 FONT_MEDIUM = "/usr/share/fonts/truetype/google-fonts/Poppins-Medium.ttf"
 
+# Google Fonts download URLs — used as fallback when local path is missing
+_FONT_URLS = {
+    FONT_BOLD:   "https://github.com/google/fonts/raw/main/ofl/poppins/Poppins-Bold.ttf",
+    FONT_MEDIUM: "https://github.com/google/fonts/raw/main/ofl/poppins/Poppins-Medium.ttf",
+}
+_font_cache: dict = {}
+
+
+def _ensure_font(path: str) -> str:
+    """Return a valid .ttf path: the original if present, otherwise download it to /tmp."""
+    if path in _font_cache:
+        return _font_cache[path]
+    if os.path.exists(path):
+        _font_cache[path] = path
+        return path
+    local = os.path.join("/tmp", os.path.basename(path))
+    if not os.path.exists(local):
+        url = _FONT_URLS.get(path)
+        if url:
+            print(f"Downloading font {os.path.basename(path)}...")
+            try:
+                r = requests.get(url, timeout=20)
+                r.raise_for_status()
+                with open(local, "wb") as fh:
+                    fh.write(r.content)
+                print(f"Font saved to {local}")
+            except Exception as e:
+                print(f"Font download failed: {e}")
+                _font_cache[path] = path
+                return path
+    _font_cache[path] = local
+    return local
+
 WHITE     = (255, 255, 255)
 BLACK     = (15,  15,  15)
 ORANGE    = (224, 82,  18)
@@ -86,9 +119,18 @@ HIGHLIGHT_WORDS = {
 # ── FONT / DRAW HELPERS ───────────────────────────────────────────────────────
 
 def get_font(path, size):
+    resolved = _ensure_font(path)
     try:
-        return ImageFont.truetype(path, size)
+        return ImageFont.truetype(resolved, size)
     except Exception:
+        # Last resort: try system DejaVu which is always present on Ubuntu
+        for fallback in ["/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+                         "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf"]:
+            if os.path.exists(fallback):
+                try:
+                    return ImageFont.truetype(fallback, size)
+                except Exception:
+                    pass
         return ImageFont.load_default()
 
 
