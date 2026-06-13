@@ -31,11 +31,13 @@ IMG_W, IMG_H = 1080, 1080
 
 FONT_BOLD   = "/usr/share/fonts/truetype/google-fonts/Poppins-Bold.ttf"
 FONT_MEDIUM = "/usr/share/fonts/truetype/google-fonts/Poppins-Medium.ttf"
+FONT_EMOJI  = "/usr/share/fonts/truetype/noto/NotoColorEmoji.ttf"
 
 # Google Fonts download URLs — used as fallback when local path is missing
 _FONT_URLS = {
     FONT_BOLD:   "https://github.com/google/fonts/raw/main/ofl/poppins/Poppins-Bold.ttf",
     FONT_MEDIUM: "https://github.com/google/fonts/raw/main/ofl/poppins/Poppins-Medium.ttf",
+    FONT_EMOJI:  "https://github.com/googlefonts/noto-emoji/raw/main/fonts/NotoColorEmoji.ttf",
 }
 _font_cache: dict = {}
 
@@ -69,6 +71,12 @@ WHITE     = (255, 255, 255)
 BLACK     = (15,  15,  15)
 ORANGE    = (224, 82,  18)
 BLUE_LINE = (25,  100, 220)
+
+# ── CARD TEXT COLORS (two-color scheme inside white card) ─────────────────────
+# PRIMARY_TEXT  = dominant color for non-highlighted words
+# ACCENT_TEXT   = highlight color for key financial/geo terms
+PRIMARY_TEXT = BLACK   # dark charcoal — matches Arabian Startups style
+ACCENT_TEXT  = ORANGE  # vivid orange — matches Smashi Business style
 
 COUNTRY_MAP = {
     "Saudi Arabia": {"code": "KSA",     "flag": "🇸🇦"},
@@ -134,20 +142,113 @@ def get_font(path, size):
         return ImageFont.load_default()
 
 
+def ensure_noto_emoji():
+    """Download Noto Color Emoji to /tmp if not installed system-wide."""
+    if os.path.exists(FONT_EMOJI):
+        return
+    local = os.path.join("/tmp", "NotoColorEmoji.ttf")
+    if os.path.exists(local):
+        _font_cache[FONT_EMOJI] = local
+        return
+    url = _FONT_URLS[FONT_EMOJI]
+    print("Downloading NotoColorEmoji font…")
+    try:
+        r = requests.get(url, timeout=30)
+        r.raise_for_status()
+        with open(local, "wb") as fh:
+            fh.write(r.content)
+        _font_cache[FONT_EMOJI] = local
+        print(f"NotoColorEmoji saved to {local}")
+    except Exception as e:
+        print(f"⚠️  NotoColorEmoji download failed: {e}")
+
+
 def measure(draw, text, font):
     bb = draw.textbbox((0, 0), text, font=font)
     return bb[2] - bb[0], bb[3] - bb[1]
 
 
+def _is_emoji(char: str) -> bool:
+    """Return True if the character is an emoji codepoint."""
+    cp = ord(char)
+    return (
+        0x1F300 <= cp <= 0x1FAFF or  # Misc symbols, emoticons, transport, etc.
+        0x2600  <= cp <= 0x27BF or   # Misc symbols & dingbats
+        0x1F000 <= cp <= 0x1F02F or  # Mahjong / domino
+        0x1F0A0 <= cp <= 0x1F0FF or  # Playing cards
+        0xFE00  <= cp <= 0xFE0F or   # Variation selectors
+        0x200D == cp                  # Zero-width joiner
+    )
+
+
+def draw_text_with_emoji(base_img: Image.Image, xy: tuple, text: str,
+                         font, fill, emoji_size: int = None):
+    """
+    Draw text with emoji support by compositing Noto Color Emoji glyphs inline.
+    Falls back to plain draw.text() if the emoji font is unavailable.
+    """
+    emoji_font_path = _ensure_font(FONT_EMOJI)
+    if not os.path.exists(emoji_font_path):
+        # No emoji font — draw plain text
+        draw = ImageDraw.Draw(base_img)
+        draw.text(xy, text, font=font, fill=fill)
+        return
+
+    # Split text into emoji / non-emoji segments
+    segments = []
+    buf = ""
+    for ch in text:
+        if _is_emoji(ch):
+            if buf:
+                segments.append(("text", buf))
+                buf = ""
+            segments.append(("emoji", ch))
+        else:
+            buf += ch
+    if buf:
+        segments.append(("text", buf))
+
+    draw     = ImageDraw.Draw(base_img)
+    x, y     = xy
+    e_size   = emoji_size or (font.size if hasattr(font, "size") else 64)
+    try:
+        e_font = ImageFont.truetype(emoji_font_path, e_size)
+    except Exception:
+        draw.text(xy, text, font=font, fill=fill)
+        return
+
+    for seg_type, seg_text in segments:
+        if seg_type == "text":
+            draw.text((x, y), seg_text, font=font, fill=fill)
+            bb = draw.textbbox((x, y), seg_text, font=font)
+            x  = bb[2]
+        else:
+            # Render emoji via Noto Color Emoji onto a small RGBA patch
+            try:
+                patch = Image.new("RGBA", (e_size * 2, e_size * 2), (0, 0, 0, 0))
+                pd    = ImageDraw.Draw(patch)
+                pd.text((0, 0), seg_text, font=e_font, embedded_color=True)
+                # Crop to actual glyph
+                bb_patch = pd.textbbox((0, 0), seg_text, font=e_font)
+                glyph_w  = max(bb_patch[2] - bb_patch[0], 1)
+                glyph_h  = max(bb_patch[3] - bb_patch[1], 1)
+                patch    = patch.crop((0, 0, glyph_w + 4, glyph_h + 4))
+                base_img.paste(patch, (int(x), int(y)), patch)
+                x += glyph_w + 4
+            except Exception:
+                # Pillow too old for embedded_color — skip emoji silently
+                x += e_size
+
+
 def word_color(word):
     clean = word.lower().strip(".,!?:;\"'()[]%#@")
     if clean.startswith("$") or (any(c.isdigit() for c in clean) and any(c.isalpha() for c in clean)):
-        return ORANGE
+        return ACCENT_TEXT
     if clean in HIGHLIGHT_WORDS:
-        return ORANGE
+        return ACCENT_TEXT
     if word.isupper() and len(word) >= 2 and word.isalpha():
-        return ORANGE
-    return BLACK
+        return ACCENT_TEXT
+    return PRIMARY_TEXT
 
 
 def wrap_words(draw, words, font, max_w):
@@ -192,15 +293,19 @@ def draw_colored_line(draw, word_list, font, x, y):
         cx += w + sp_w
 
 
-def draw_colored_line_centered(draw, word_list, font, card_x, card_w, y):
-    """Center-aligned word-by-word colored text — Smashi style."""
+def draw_colored_line_centered(draw, word_list, font, card_x, card_w, y, base_img=None):
+    """Center-aligned word-by-word colored text — Smashi style. Uses emoji compositing if base_img provided."""
     sp_w, _ = measure(draw, " ", font)
     line_text = " ".join(word_list)
     total_w, _ = measure(draw, line_text, font)
     start_x = card_x + (card_w - total_w) // 2
     cx = start_x
     for word in word_list:
-        draw.text((cx, y), word, font=font, fill=word_color(word))
+        color = word_color(word)
+        if base_img is not None:
+            draw_text_with_emoji(base_img, (cx, y), word, font=font, fill=color)
+        else:
+            draw.text((cx, y), word, font=font, fill=color)
         w, _ = measure(draw, word, font)
         cx += w + sp_w
 
@@ -534,7 +639,7 @@ def generate_branded_image(bg_bytes, headline, country_name, logo_bytes=None):
     text_start_y = card_y + BORDER_W + (inner_h - text_block_h) // 2
     ty = text_start_y
     for word_list in lines:
-        draw_colored_line_centered(draw, word_list, font, inner_card_x, inner_card_w, ty)
+        draw_colored_line_centered(draw, word_list, font, inner_card_x, inner_card_w, ty, base_img=base)
         ty += line_h
 
     # ── Country code pill — top left ──
@@ -769,13 +874,14 @@ def generate_post_content(title: str, summary: str, source_url: str) -> str:
         f"Summary: {summary}\n\n"
         f"IMPORTANT: Write ONLY about the article above.\n"
         f"Requirements:\n"
-        f"- Start with a compelling hook (no generic openers like 'Exciting news')\n"
+        f"- Start with a compelling hook using a relevant emoji (no generic openers like 'Exciting news')\n"
         f"- 3-5 short paragraphs\n"
+        f"- Use 1-2 relevant emojis per paragraph to enhance visual scanning (💡🚀💰🤝📈🌍🏙️⚡ etc.)\n"
         f"- Do NOT include the article URL inside the paragraphs\n"
         f"- After the last paragraph add exactly one blank line then: Read more: {source_url}\n"
         f"- After that add exactly one blank line then end with 4-6 relevant hashtags\n"
         f"- Tone: insightful, professional, engaging\n"
-        f"- CRITICAL: No markdown. No asterisks. Plain text only."
+        f"- CRITICAL: No markdown. No asterisks. Plain text only. Emojis are allowed and encouraged."
     )
     print("🚀 Generating post with Groq…")
     try:
@@ -792,6 +898,8 @@ def generate_post_content(title: str, summary: str, source_url: str) -> str:
 # ── MAIN ─────────────────────────────────────────────────────────────────────
 
 def main():
+    ensure_noto_emoji()  # Download Noto Color Emoji if not present
+
     country_name = get_country_for_today()
     country_data = COUNTRY_MAP.get(country_name, {"code": "GCC", "flag": "🌍"})
     flag         = country_data["flag"]
@@ -811,17 +919,16 @@ def main():
 
     print(f"📰 Article: {db_title}")
 
-    # 2. Generate LinkedIn post text
+    # 2. Generate LinkedIn post text (now includes emojis)
     post_text = generate_post_content(
         db_title or summary or country_name,
         summary  or "",
         source_url or "",
     )
 
-    # 3. Build image headline
-    title_lower  = (db_title or "").lower()
-    # NOTE: Pillow cannot render emoji — they show as □. Image headline is plain text only.
-    image_headline = (db_title or "").strip() or post_text.split("\n")[0][:100]
+    # 3. Build image headline — include country flag emoji prefix
+    # Noto Color Emoji is used at render-time to composite emoji glyphs
+    image_headline = f"{flag} " + ((db_title or "").strip() or post_text.split("\n")[0][:100])
 
     # 4. Get background: og:image → AI-generated → gradient
     bg_bytes, bg_source = get_background_image(
