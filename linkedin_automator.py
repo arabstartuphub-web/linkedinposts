@@ -461,61 +461,72 @@ def build_image_prompt(title: str, summary: str, country_name: str) -> str:
 
 
 def generate_image_with_gemini(prompt: str) -> bytes:
+    """
+    Try image generation models in priority order across all keys.
+    Model list (in priority order, most capable first):
+      1. imagen-3.0-generate-002   — v1 endpoint (NOT v1beta)
+      2. imagen-3.0-fast-generate-001 — v1 endpoint, faster/cheaper fallback
+      3. gemini-2.0-flash-exp      — v1beta, multimodal image output
+    """
     if not GEMINI_KEYS:
         raise RuntimeError("No Gemini API keys configured.")
-    models = [
-        {
-            "name":     "imagen-3.0-generate-002",
-            "type":     "imagen",
-        },
-        {
-            "name":     "gemini-2.0-flash-preview-image-generation",
-            "type":     "gemini_multimodal",
-        },
+
+    # Each entry: (display_name, type, api_version, model_id)
+    MODELS = [
+        ("imagen-3.0-generate-002",      "imagen",   "v1",    "imagen-3.0-generate-002"),
+        ("imagen-3.0-fast-generate-001", "imagen",   "v1",    "imagen-3.0-fast-generate-001"),
+        ("gemini-2.0-flash-exp",         "gemini",   "v1beta","gemini-2.0-flash-exp"),
     ]
+
     for key_idx, key in enumerate(GEMINI_KEYS):
-        for model in models:
-            print(f"🎨 Trying {model['name']} with key {key_idx + 1}/{len(GEMINI_KEYS)}…")
+        for display, mtype, api_ver, model_id in MODELS:
+            print(f"🎨 Trying {display} with key {key_idx + 1}/{len(GEMINI_KEYS)}…")
             try:
-                img_bytes = _call_gemini_image_model(model, key, prompt)
+                img_bytes = _call_gemini_image_model(mtype, api_ver, model_id, key, prompt)
                 if img_bytes:
-                    print(f"✅ Image generated with {model['name']}")
+                    print(f"✅ Image generated with {display}")
                     return img_bytes
             except Exception as e:
-                print(f"   ⚠️  {model['name']} key {key_idx+1} failed: {e}")
-                if "429" in str(e) or "quota" in str(e).lower():
-                    time.sleep(10)
+                err = str(e)
+                print(f"   ⚠️  {display} key {key_idx+1} failed: {err[:200]}")
+                if "429" in err or "quota" in err.lower() or "RESOURCE_EXHAUSTED" in err:
+                    time.sleep(15)
+                elif "404" in err:
+                    break  # model doesn't exist on this key tier — skip remaining keys for this model
     raise RuntimeError("All Gemini image generation attempts exhausted.")
 
 
-def _call_gemini_image_model(model: dict, key: str, prompt: str) -> bytes:
-    if model["type"] == "gemini_multimodal":
+def _call_gemini_image_model(mtype: str, api_ver: str, model_id: str,
+                              key: str, prompt: str) -> bytes:
+    if mtype == "gemini":
+        # gemini-2.0-flash-exp: multimodal content generation with image output
         url = (
-            f"https://generativelanguage.googleapis.com/v1beta/models/"
-            f"gemini-2.0-flash-preview-image-generation:generateContent?key={key}"
+            f"https://generativelanguage.googleapis.com/{api_ver}/models/"
+            f"{model_id}:generateContent?key={key}"
         )
         payload = {
             "contents": [{"parts": [{"text": prompt}]}],
-            "generationConfig": {"responseModalities": ["IMAGE"]},
+            "generationConfig": {"responseModalities": ["TEXT", "IMAGE"]},
         }
-        r = requests.post(url, json=payload, timeout=60)
+        r = requests.post(url, json=payload, timeout=90)
         if r.status_code != 200:
-            raise RuntimeError(f"HTTP {r.status_code}: {r.text[:300]}")
+            raise RuntimeError(f"HTTP {r.status_code}: {r.text[:400]}")
         data = r.json()
         for candidate in data.get("candidates", []):
             for part in candidate.get("content", {}).get("parts", []):
                 inline = part.get("inlineData", {})
-                if inline.get("data"):
+                if inline.get("mimeType", "").startswith("image/") and inline.get("data"):
                     return base64.b64decode(inline["data"])
-        raise RuntimeError(f"No image in response: {str(data)[:300]}")
+        raise RuntimeError(f"No image part in Gemini response: {str(data)[:300]}")
 
-    elif model["type"] == "imagen":
+    elif mtype == "imagen":
+        # Imagen 3 — must use v1 (NOT v1beta), uses :predict endpoint
         url = (
-            f"https://generativelanguage.googleapis.com/v1beta/"
-            f"models/imagen-3.0-generate-002:predict?key={key}"
+            f"https://generativelanguage.googleapis.com/{api_ver}/models/"
+            f"{model_id}:predict?key={key}"
         )
         payload = {
-            "instances": [{"prompt": prompt}],
+            "instances":  [{"prompt": prompt}],
             "parameters": {
                 "sampleCount":       1,
                 "aspectRatio":       "1:1",
@@ -523,23 +534,65 @@ def _call_gemini_image_model(model: dict, key: str, prompt: str) -> bytes:
                 "personGeneration":  "allow_adult",
             },
         }
-        r = requests.post(url, json=payload, timeout=60)
+        r = requests.post(url, json=payload, timeout=90)
         if r.status_code != 200:
-            raise RuntimeError(f"HTTP {r.status_code}: {r.text[:300]}")
+            raise RuntimeError(f"HTTP {r.status_code}: {r.text[:400]}")
         data  = r.json()
         preds = data.get("predictions", [])
         if preds and preds[0].get("bytesBase64Encoded"):
             return base64.b64decode(preds[0]["bytesBase64Encoded"])
-        raise RuntimeError(f"No image in response: {str(data)[:300]}")
+        raise RuntimeError(f"No prediction in Imagen response: {str(data)[:300]}")
 
-    raise RuntimeError(f"Unknown model type: {model['type']}")
+    raise RuntimeError(f"Unknown model type: {mtype}")
+
+
+def generate_image_with_pollinations(prompt: str) -> bytes:
+    """
+    Pollinations.AI — completely free, no API key, no signup, no quota.
+    Uses FLUX.1 under the hood. Returns raw image bytes (JPEG/PNG).
+
+    Endpoint: GET https://image.pollinations.ai/prompt/{url-encoded-prompt}
+    Params:
+      width=1080, height=1080  → square 1:1 for LinkedIn
+      model=flux               → FLUX.1 (best quality on Pollinations)
+      nologo=true              → strip the Pollinations watermark
+      seed=<random>            → reproducible but varied results
+    """
+    import urllib.parse
+    import random
+
+    # Keep prompt under 500 chars — very long prompts get truncated by the service
+    short_prompt = prompt[:480]
+    encoded      = urllib.parse.quote(short_prompt)
+    seed         = random.randint(1, 999999)
+
+    url = (
+        f"https://image.pollinations.ai/prompt/{encoded}"
+        f"?width=1080&height=1080&model=flux&nologo=true&seed={seed}"
+    )
+    print(f"🌸 Trying Pollinations.AI (FLUX.1)…")
+    try:
+        r = requests.get(url, timeout=120, headers={"User-Agent": "Mozilla/5.0"})
+        if r.status_code == 200 and len(r.content) > 10000:
+            # Validate it's actually an image
+            Image.open(io.BytesIO(r.content)).verify()
+            print(f"✅ Pollinations.AI image generated ({len(r.content)//1024}KB)")
+            return r.content
+        raise RuntimeError(f"Pollinations returned {r.status_code}, {len(r.content)} bytes")
+    except Exception as e:
+        raise RuntimeError(f"Pollinations.AI failed: {e}")
 
 
 # ── BACKGROUND ────────────────────────────────────────────────────────────────
 
 def is_image_too_light(img: Image.Image,
-                       threshold: int = 195,
-                       light_fraction: float = 0.55) -> bool:
+                       threshold: int = 210,
+                       light_fraction: float = 0.80) -> bool:
+    """
+    Returns True only if the image is extremely washed-out (>80% near-white pixels).
+    We apply a heavy dark overlay in generate_branded_image anyway, so most images
+    are fine — only truly all-white/blank images get rejected.
+    """
     small = img.resize((40, 40), Image.LANCZOS).convert("RGB")
     w, h  = small.size
     total = light = 0
@@ -552,16 +605,30 @@ def is_image_too_light(img: Image.Image,
             if luminance > threshold:
                 light += weight
     ratio = light / total
-    print(f"  Brightness ratio: {ratio:.2f} ({'too light' if ratio > light_fraction else 'OK'})")
+    print(f"  Brightness ratio: {ratio:.2f} ({'rejected — too light' if ratio > light_fraction else 'OK — accepted'})")
     return ratio > light_fraction
 
 
 def fetch_og_image_bytes(url: str):
     if not url:
         return None
+    # Realistic browser headers to avoid 403 blocks from news sites
+    HEADERS = {
+        "User-Agent": (
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/124.0.0.0 Safari/537.36"
+        ),
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Accept-Encoding": "gzip, deflate, br",
+        "Cache-Control": "no-cache",
+        "Pragma": "no-cache",
+    }
     try:
-        res = requests.get(url, timeout=10, headers={"User-Agent": "Mozilla/5.0"})
+        res = requests.get(url, timeout=15, headers=HEADERS, allow_redirects=True)
         if res.status_code != 200:
+            print(f"⚠️  Article page returned {res.status_code}")
             return None
 
         class OGParser(HTMLParser):
@@ -569,19 +636,33 @@ def fetch_og_image_bytes(url: str):
                 super().__init__()
                 self.og_image = None
             def handle_starttag(self, tag, attrs):
+                if self.og_image:
+                    return
                 if tag == "meta":
                     d = dict(attrs)
-                    if d.get("property") == "og:image":
-                        self.og_image = d.get("content")
+                    # Accept both og:image and twitter:image
+                    prop = d.get("property") or d.get("name") or ""
+                    if prop in ("og:image", "twitter:image", "twitter:image:src"):
+                        val = d.get("content") or d.get("value")
+                        if val:
+                            self.og_image = val
 
         parser = OGParser()
         parser.feed(res.text)
         if not parser.og_image:
+            print("⚠️  No og:image or twitter:image meta tag found.")
             return None
-        print(f"✅ og:image found: {parser.og_image}")
-        img_res = requests.get(parser.og_image, timeout=10, headers={"User-Agent": "Mozilla/5.0"})
-        if img_res.status_code == 200:
+
+        og_url = parser.og_image
+        # Handle protocol-relative URLs
+        if og_url.startswith("//"):
+            og_url = "https:" + og_url
+
+        print(f"✅ og:image found: {og_url}")
+        img_res = requests.get(og_url, timeout=15, headers=HEADERS, allow_redirects=True)
+        if img_res.status_code == 200 and len(img_res.content) > 5000:
             return img_res.content
+        print(f"⚠️  og:image download failed or too small: {img_res.status_code}, {len(img_res.content)} bytes")
     except Exception as e:
         print(f"⚠️  og:image fetch failed: {e}")
     return None
@@ -616,43 +697,177 @@ def prepare_background(img_bytes, country_name: str) -> Image.Image:
     return make_gradient_bg(country_name)
 
 
+def _darken_image_for_editorial(img: Image.Image) -> Image.Image:
+    """Apply a cinematic dark overlay to make any light image work as a background."""
+    overlay = Image.new("RGBA", img.size, (0, 0, 0, 80))  # 31% dark tint
+    return Image.alpha_composite(img.convert("RGBA"), overlay).convert("RGB")
+
+
+def _restyle_with_gemini(og_bytes: bytes, prompt: str, key: str) -> bytes:
+    """
+    Send the og:image to Gemini vision + ask it to describe what it sees,
+    then use that enriched description for a fresh Imagen generation.
+    This is the 'restyle' path: use article image as creative inspiration.
+    """
+    # Step 1: ask Gemini to describe the og:image visually
+    img_b64 = base64.b64encode(og_bytes).decode()
+    desc_url = (
+        f"https://generativelanguage.googleapis.com/v1beta/models/"
+        f"gemini-2.0-flash:generateContent?key={key}"
+    )
+    desc_payload = {
+        "contents": [{
+            "parts": [
+                {
+                    "inlineData": {
+                        "mimeType": "image/jpeg",
+                        "data": img_b64,
+                    }
+                },
+                {
+                    "text": (
+                        "Describe this image in detail for an image generation prompt: "
+                        "subjects, setting, lighting, colors, mood, composition. "
+                        "Max 60 words. Output only the description, no preamble."
+                    )
+                }
+            ]
+        }]
+    }
+    r = requests.post(desc_url, json=desc_payload, timeout=30)
+    if r.status_code == 200:
+        try:
+            og_desc = r.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
+            print(f"  🔍 og:image described: {og_desc[:80]}…")
+            # Enrich the generation prompt with the actual image content
+            enriched = f"{prompt}\n\nKey visual elements from the article's image: {og_desc}"
+            return enriched
+        except Exception:
+            pass
+    return prompt  # fallback: use original prompt unchanged
+
+
+def fetch_country_repo_image(country_name: str) -> bytes:
+    """
+    Fetch the pre-stored country background image from the GitHub repo.
+    Expected filenames (in repo root): KSA.jpg, UAE.jpg, QATAR.jpg,
+    KUWAIT.jpg, OMAN.jpg, BAHRAIN.jpg, GCC.jpg
+    Uses the country code from COUNTRY_MAP to build the filename.
+    """
+    code = COUNTRY_MAP.get(country_name, {}).get("code", country_name[:3].upper())
+    filename = f"{code}.jpg"
+    url = f"{GITHUB_BASE}{filename}"
+    print(f"🗂  Fetching country repo image: {filename}…")
+    try:
+        r = requests.get(url, timeout=15, headers={"User-Agent": "Mozilla/5.0"})
+        if r.status_code == 200 and len(r.content) > 5000:
+            # Validate it's a real image
+            Image.open(io.BytesIO(r.content)).verify()
+            print(f"✅ Country repo image fetched: {filename} ({len(r.content)//1024}KB)")
+            return r.content
+        raise RuntimeError(f"Repo image {filename} returned {r.status_code}, {len(r.content)} bytes")
+    except Exception as e:
+        raise RuntimeError(f"Country repo image fetch failed: {e}")
+
+
 def get_background_image(source_url: str, title: str, summary: str, country_name: str):
     """
-    Priority: 1) og:image (if dark enough)  2) Gemini AI image  3) gradient
-    Returns (bytes_or_None, source_label)
+    Background image pipeline (Smashi editorial style):
+      1. Fetch og:image from article URL (robust browser headers)
+      2. Gemini Imagen/Flash — enriched with og:image description if available
+      3. Pollinations.AI (FLUX.1) — free, no key, no quota
+      4. og:image used directly with dark editorial overlay
+      5. Country repo image (KSA.jpg / UAE.jpg / etc. from GitHub repo root)
+      6. Gradient — absolute last resort
+
+    Goal: always a real photorealistic background, gradient only if everything fails.
     """
-    # Step 1: og:image
+    # Build base AI prompt from article content
+    base_prompt = build_image_prompt(title, summary, country_name)
+    print(f"📝 Image prompt (preview): {base_prompt[:100]}…")
+
+    # Step 1: Try to get og:image
     og_bytes = fetch_og_image_bytes(source_url)
     if og_bytes:
         try:
             og_img = Image.open(io.BytesIO(og_bytes)).convert("RGB")
             if not is_image_too_light(og_img):
-                print("✅ Using og:image as background.")
-                return og_bytes, "og_image"
+                print("✅ og:image fetched and accepted as visual reference.")
             else:
-                print("⚠️  og:image too light — trying AI image.")
+                print("⚠️  og:image very light but keeping as reference — AI will restyle.")
         except Exception as e:
-            print(f"⚠️  og:image decode failed: {e}")
+            print(f"⚠️  og:image validation failed: {e}")
+            og_bytes = None
 
-    # Step 2: AI-generated image
+    # Step 2: AI image generation — enriched with og:image description if available
     print("🎨 Generating AI background image…")
-    try:
-        img_prompt = build_image_prompt(title, summary, country_name)
-        print(f"📝 Image prompt (preview): {img_prompt[:100]}…")
-        ai_bytes = generate_image_with_gemini(img_prompt)
+    final_prompt = base_prompt
+    if og_bytes and GEMINI_KEYS:
         try:
-            ai_img = Image.open(io.BytesIO(ai_bytes)).convert("RGB")
-            if is_image_too_light(ai_img):
-                print("⚠️  AI image too light — falling back to gradient.")
-                return None, "gradient"
-        except Exception:
-            pass
-        return ai_bytes, "ai_generated"
-    except Exception as e:
-        print(f"⚠️  AI image generation failed: {e}")
+            final_prompt = _restyle_with_gemini(og_bytes, base_prompt, GEMINI_KEYS[0])
+        except Exception as e:
+            print(f"⚠️  og:image description failed: {e}")
 
-    # Step 3: gradient fallback
-    print("ℹ️  Using country gradient background.")
+    try:
+        ai_bytes = generate_image_with_gemini(final_prompt)
+        if ai_bytes:
+            try:
+                ai_img = Image.open(io.BytesIO(ai_bytes)).convert("RGB")
+                if is_image_too_light(ai_img):
+                    print("⚠️  AI image extremely light — applying dark overlay.")
+                    ai_img = _darken_image_for_editorial(ai_img)
+                    buf = io.BytesIO()
+                    ai_img.save(buf, "JPEG", quality=92)
+                    ai_bytes = buf.getvalue()
+            except Exception:
+                pass
+            return ai_bytes, "ai_generated"
+    except Exception as e:
+        print(f"⚠️  Gemini image generation failed: {e}")
+
+    # Step 3: Pollinations.AI — free, no key, FLUX.1 quality
+    print("🌸 Falling back to Pollinations.AI…")
+    try:
+        poll_bytes = generate_image_with_pollinations(final_prompt)
+        if poll_bytes:
+            try:
+                poll_img = Image.open(io.BytesIO(poll_bytes)).convert("RGB")
+                if is_image_too_light(poll_img):
+                    print("⚠️  Pollinations image very light — applying dark overlay.")
+                    poll_img = _darken_image_for_editorial(poll_img)
+                    buf = io.BytesIO()
+                    poll_img.save(buf, "JPEG", quality=92)
+                    poll_bytes = buf.getvalue()
+            except Exception:
+                pass
+            return poll_bytes, "pollinations_ai"
+    except Exception as e:
+        print(f"⚠️  Pollinations.AI failed: {e}")
+
+    # Step 4: All AI failed — use og:image directly with dark overlay
+    if og_bytes:
+        print("ℹ️  All AI failed — using og:image directly with dark overlay.")
+        try:
+            og_img = Image.open(io.BytesIO(og_bytes)).convert("RGB")
+            og_img = _darken_image_for_editorial(og_img)
+            buf = io.BytesIO()
+            og_img.save(buf, "JPEG", quality=92)
+            return buf.getvalue(), "og_image_darkened"
+        except Exception as e:
+            print(f"⚠️  og:image direct use failed: {e}")
+
+    # Step 5: Country repo image (KSA.jpg / UAE.jpg / etc.)
+    print(f"🗂  Trying country repo image for {country_name}…")
+    try:
+        repo_bytes = fetch_country_repo_image(country_name)
+        if repo_bytes:
+            # No dark overlay needed — these images are pre-designed for this purpose
+            return repo_bytes, "country_repo_image"
+    except Exception as e:
+        print(f"⚠️  Country repo image failed: {e}")
+
+    # Step 6: everything failed — gradient
+    print("ℹ️  All image sources exhausted — using country gradient.")
     return None, "gradient"
 
 
@@ -756,25 +971,50 @@ def generate_branded_image(bg_bytes, headline: str, country_name: str,
         ty += line_h
 
     # ── COUNTRY FLAG — large, floating top-left of the image ──────────────────
-    flag_str  = COUNTRY_MAP.get(country_name, {}).get("flag", "")
-    FLAG_SIZE = 88
+    # NotoColorEmoji is a bitmap font: only renders correctly at size 109px.
+    # We render at 109, then scale the patch down to TARGET_SIZE.
+    flag_str     = COUNTRY_MAP.get(country_name, {}).get("flag", "")
+    TARGET_FLAG  = 90   # visual size on the final image (px)
+    NOTO_SIZE    = 109  # NotoColorEmoji's native bitmap size
     FLAG_X, FLAG_Y = 22, 18
 
+    flag_rendered = False
     if flag_str:
         emoji_font_path = _ensure_font(FONT_EMOJI)
         if os.path.exists(emoji_font_path):
             try:
-                flag_font  = ImageFont.truetype(emoji_font_path, FLAG_SIZE)
-                flag_patch = Image.new("RGBA", (FLAG_SIZE * 3, FLAG_SIZE * 3), (0, 0, 0, 0))
+                flag_font  = ImageFont.truetype(emoji_font_path, NOTO_SIZE)
+                patch_dim  = NOTO_SIZE * 3
+                flag_patch = Image.new("RGBA", (patch_dim, patch_dim), (0, 0, 0, 0))
                 fpd = ImageDraw.Draw(flag_patch)
                 fpd.text((0, 0), flag_str, font=flag_font, embedded_color=True)
                 bb  = fpd.textbbox((0, 0), flag_str, font=flag_font)
                 fw  = max(bb[2] - bb[0], 1)
                 fh  = max(bb[3] - bb[1], 1)
-                flag_patch = flag_patch.crop((0, 0, min(fw + 4, FLAG_SIZE * 3), min(fh + 4, FLAG_SIZE * 3)))
+                flag_patch = flag_patch.crop((0, 0, min(fw + 4, patch_dim), min(fh + 4, patch_dim)))
+                # Scale down to TARGET_FLAG
+                scale      = TARGET_FLAG / max(flag_patch.width, flag_patch.height)
+                new_w      = max(1, int(flag_patch.width  * scale))
+                new_h      = max(1, int(flag_patch.height * scale))
+                flag_patch = flag_patch.resize((new_w, new_h), Image.LANCZOS)
                 base.paste(flag_patch, (FLAG_X, FLAG_Y), flag_patch)
+                flag_rendered = True
+                print(f"  🏳  Flag rendered at {new_w}×{new_h}px")
             except Exception as e:
                 print(f"⚠️  Flag render failed: {e}")
+
+    if not flag_rendered:
+        # Fallback: draw a colored country-code pill in the top-left
+        draw = ImageDraw.Draw(base)
+        country_code = COUNTRY_MAP.get(country_name, {}).get("code", country_name[:3].upper())
+        pill_font = get_font(FONT_BOLD, 28)
+        cw, ch    = measure(draw, country_code, pill_font)
+        pill_x, pill_y = FLAG_X, FLAG_Y
+        pill_w, pill_h = cw + 32, ch + 20
+        draw.rounded_rectangle([pill_x, pill_y, pill_x + pill_w, pill_y + pill_h],
+                                radius=12, fill=(20, 20, 20))
+        draw.text((pill_x + 16, pill_y + 10), country_code, font=pill_font, fill=WHITE)
+
 
     # ── LOGO — top right ───────────────────────────────────────────────────────
     LOGO_SIZE   = 72
