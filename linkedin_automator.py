@@ -110,17 +110,30 @@ COUNTRY_VISUAL = {
 }
 
 HIGHLIGHT_WORDS = {
-    "million","billion","trillion","fund","funding","raises","raised",
-    "invest","investment","valuation","deal","unicorn","ipo","series",
-    "saudi","arabia","uae","qatar","kuwait","oman","bahrain","gcc",
-    "mena","dubai","riyadh","abu","dhabi","doha","muscat","manama",
-    "lebanese","lebanon","arab","emirati","khaleeji","jordanian",
-    "egyptian","moroccan","tunisian","iraqi","yemeni","libyan",
-    "launches","launch","orders","ordered","wins","bans","ban",
-    "lifts","lifted","builds","built","becomes","became","joins",
-    "signs","acquires","expands","hits","secures","secured","closes",
-    "closed","backs","backed","funds","funded","partners","partnered",
-    "invests","invested","announces","announced","unveils","unveiled",
+    # Money / scale
+    "million","billion","trillion","mn","bn",
+    # Finance
+    "fund","funding","funds","funded","raises","raised","raise",
+    "invest","investment","investments","investor","investors",
+    "valuation","deal","deals","unicorn","ipo","series","capital","vc",
+    "grant","grants","backs","backed","secures","secured","closes","closed",
+    "invests","invested","partners","partnered",
+    # Action verbs
+    "launches","launch","launched","debuts","debut","unveils","unveiled",
+    "wins","win","bans","ban","lifts","lifted","builds","built",
+    "becomes","became","joins","signs","acquires","acquired","acquisition",
+    "expands","expanded","hits","announces","announced",
+    "supports","supported","opens","open","awards","awarded",
+    "creates","created","targets","grows","selects","selected",
+    # GCC / MENA geo
+    "saudi","arabia","uae","qatar","kuwait","oman","bahrain","gcc","mena",
+    "dubai","riyadh","abu","dhabi","doha","muscat","manama",
+    "jeddah","neom","vision","2030",
+    # Impact words
+    "record","first","largest","biggest","new","major","key","top",
+    "leading","fastest","global","regional","international",
+    # Known orgs
+    "tamkeen","stc","aramco","adnoc","misk","sdaia","sabic",
 }
 
 
@@ -289,26 +302,70 @@ def draw_text_with_emoji(base_img: Image.Image, xy: tuple, text: str,
 
 
 def word_color(word):
-    clean = word.lower().strip(".,!?:;\"'()[]%#@")
-    if clean.startswith("$") or (any(c.isdigit() for c in clean) and any(c.isalpha() for c in clean)):
+    """Return ACCENT_TEXT (orange) for impactful words, PRIMARY_TEXT (black) for the rest."""
+    clean = word.lower().strip(".,!?:;\"'()[]%#@$")
+
+    # Any token containing digits → orange (500, BD12M, 12th, $15B)
+    if any(c.isdigit() for c in clean):
         return ACCENT_TEXT
+
+    # Currency prefix
+    if word.startswith("$") or word.startswith("€") or word.startswith("£") or word.upper().startswith("BD"):
+        return ACCENT_TEXT
+
+    # In highlight set (case-insensitive)
     if clean in HIGHLIGHT_WORDS:
         return ACCENT_TEXT
-    if word.isupper() and len(word) >= 2 and word.isalpha():
-        return ACCENT_TEXT
+
     return PRIMARY_TEXT
 
 
+def tokenize_headline(text: str):
+    """
+    Split headline into tokens preserving emoji clusters as atomic units.
+    Returns list of strings (words and emoji tokens), space-separated words split normally.
+    """
+    tokens = []
+    # First split by grapheme clusters to isolate emoji
+    segments = _split_grapheme_clusters(text)
+    for seg_type, seg_text in segments:
+        if seg_type == "emoji":
+            tokens.append(seg_text)
+        else:
+            # Split plain text by whitespace into words
+            words = seg_text.split()
+            tokens.extend(words)
+    return [t for t in tokens if t]
+
+
+def measure_token(draw, token: str, font, emoji_size: int = None) -> int:
+    """Measure pixel width of a token (word or emoji cluster)."""
+    segs = _split_grapheme_clusters(token)
+    if all(t == "emoji" for t, _ in segs):
+        # Emoji width approximation: same as the font size
+        e_size = emoji_size or (font.size if hasattr(font, "size") else 64)
+        return e_size + 4
+    # Plain text
+    bb = draw.textbbox((0, 0), token, font=font)
+    return bb[2] - bb[0]
+
+
 def wrap_words(draw, words, font, max_w):
-    lines, cur = [], []
+    lines, cur, cur_w = [], [], 0
+    sp_w = measure_token(draw, " ", font)
     for word in words:
-        test = cur + [word]
-        w, _ = measure(draw, " ".join(test), font)
-        if w <= max_w or not cur:
-            cur = test
+        w = measure_token(draw, word, font)
+        if cur:
+            needed = cur_w + sp_w + w
+        else:
+            needed = w
+        if needed <= max_w or not cur:
+            cur.append(word)
+            cur_w = needed
         else:
             lines.append(cur)
-            cur = [word]
+            cur   = [word]
+            cur_w = w
     if cur:
         lines.append(cur)
     # Fix orphan last word
@@ -319,7 +376,7 @@ def wrap_words(draw, words, font, max_w):
 
 
 def auto_fit(draw, headline, max_w, max_h, start=90, minimum=34):
-    words = headline.split()
+    words = tokenize_headline(headline)
     for size in range(start, minimum - 1, -2):
         font   = get_font(FONT_BOLD, size)
         lines  = wrap_words(draw, words, font, max_w)
@@ -342,20 +399,40 @@ def draw_colored_line(draw, word_list, font, x, y):
 
 
 def draw_colored_line_centered(draw, word_list, font, card_x, card_w, y, base_img=None):
-    """Center-aligned word-by-word colored text — Smashi style. Uses emoji compositing if base_img provided."""
-    sp_w, _ = measure(draw, " ", font)
-    line_text = " ".join(word_list)
-    total_w, _ = measure(draw, line_text, font)
+    """Center-aligned word-by-word colored text with emoji compositing."""
+    sp_w = measure_token(draw, " ", font)
+    e_size = font.size if hasattr(font, "size") else 64
+
+    # Calculate total line width for centering
+    total_w = 0
+    for i, token in enumerate(word_list):
+        total_w += measure_token(draw, token, font, emoji_size=e_size)
+        if i < len(word_list) - 1:
+            total_w += sp_w
+
     start_x = card_x + (card_w - total_w) // 2
     cx = start_x
-    for word in word_list:
-        color = word_color(word)
-        if base_img is not None:
-            draw_text_with_emoji(base_img, (cx, y), word, font=font, fill=color)
+
+    for i, token in enumerate(word_list):
+        segs = _split_grapheme_clusters(token)
+        is_emoji_token = all(t == "emoji" for t, _ in segs)
+
+        if is_emoji_token:
+            if base_img is not None:
+                draw_text_with_emoji(base_img, (cx, y), token, font=font,
+                                     fill=PRIMARY_TEXT, emoji_size=e_size)
+            token_w = measure_token(draw, token, font, emoji_size=e_size)
         else:
-            draw.text((cx, y), word, font=font, fill=color)
-        w, _ = measure(draw, word, font)
-        cx += w + sp_w
+            color = word_color(token)
+            if base_img is not None:
+                draw_text_with_emoji(base_img, (cx, y), token, font=font, fill=color)
+            else:
+                draw.text((cx, y), token, font=font, fill=color)
+            token_w = measure_token(draw, token, font)
+
+        cx += token_w
+        if i < len(word_list) - 1:
+            cx += sp_w
 
 
 # ── AI IMAGE GENERATION ───────────────────────────────────────────────────────
@@ -641,11 +718,11 @@ def generate_branded_image(bg_bytes, headline, country_name, logo_bytes=None):
     MAX_TEXT_H  = int(IMG_H * 0.46)
     MIN_FONT    = 58
 
-    # Uppercase for bold news-card impact (Smashi does this)
-    headline_upper = headline.upper()
+    # Title Case — no uppercase (user preference), emoji preserved as-is
+    headline_display = headline.strip()
 
     font, lines, fsize, line_h = auto_fit(
-        draw, headline_upper, TEXT_W, MAX_TEXT_H, start=96, minimum=MIN_FONT
+        draw, headline_display, TEXT_W, MAX_TEXT_H, start=96, minimum=MIN_FONT
     )
     print(f"  📝 Font: {fsize}px — {len(lines)} lines")
 
