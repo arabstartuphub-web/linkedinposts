@@ -429,21 +429,22 @@ def draw_headline_line_centered(base_img: Image.Image, draw, word_list: list,
 def build_image_prompt(title: str, summary: str, country_name: str) -> str:
     country_visual = COUNTRY_VISUAL.get(country_name, "modern Middle East city, business district")
     meta_prompt = (
-        f"You are creating a background image prompt for a LinkedIn post about this article:\n"
+        f"You are creating a background image prompt for a LinkedIn post about this SPECIFIC article:\n"
         f"Title: {title}\n"
         f"Summary: {summary or 'No summary available.'}\n"
         f"Country: {country_name}\n\n"
         f"Write a single vivid, detailed image generation prompt (max 120 words) for a "
-        f"photorealistic editorial-style background image.\n\n"
+        f"photorealistic editorial-style background image that depicts THIS ARTICLE'S SPECIFIC "
+        f"subject matter — not a generic country skyline.\n\n"
         f"Rules:\n"
-        f"- The image must feel professional, journalistic, and relevant to the article topic\n"
-        f"- Incorporate this country's visual identity: {country_visual}\n"
-        f"- No text, no logos, no overlays, no watermarks in the image\n"
-        f"- Cinematic lighting, sharp focus, high detail\n"
-        f"- Style: editorial photography, wide establishing shot or dramatic close-up\n"
-        f"- If about funding/investment: business handshake, modern boardroom, or financial district at golden hour\n"
-        f"- If about startup/tech: modern coworking space, tech campus, or futuristic cityscape\n"
-        f"- If about government/policy: government buildings, official ceremony, or city skyline\n"
+        f"- First identify the concrete subject of the article (e.g. a named organization, "
+        f"a sector such as health/longevity/fintech/AI, a building, an event, a product)\n"
+        f"- The image MUST visually represent that specific subject — e.g. a longevity/health "
+        f"article should show a modern clinic, lab, or wellness setting, not just a skyline\n"
+        f"- Incorporate this country's setting subtly via: {country_visual}\n"
+        f"- No text, no logos, no overlays, no watermarks, no readable signage in the image\n"
+        f"- Cinematic lighting, sharp focus, high detail, professional editorial photography\n"
+        f"- Style: wide establishing shot or dramatic close-up relevant to the subject\n"
         f"- Output ONLY the image prompt, no preamble, no quotes, no explanation."
     )
     print("🧠 Generating AI image prompt…")
@@ -458,92 +459,6 @@ def build_image_prompt(title: str, summary: str, country_name: str) -> str:
                 f"cinematic golden hour lighting, sharp focus, wide establishing shot, "
                 f"professional business atmosphere, no text, no logos"
             )
-
-
-def generate_image_with_gemini(prompt: str) -> bytes:
-    """
-    Try image generation models in priority order across all keys.
-    Model list (in priority order, most capable first):
-      1. imagen-3.0-generate-002   — v1 endpoint (NOT v1beta)
-      2. imagen-3.0-fast-generate-001 — v1 endpoint, faster/cheaper fallback
-      3. gemini-2.0-flash-exp      — v1beta, multimodal image output
-    """
-    if not GEMINI_KEYS:
-        raise RuntimeError("No Gemini API keys configured.")
-
-    # Each entry: (display_name, type, api_version, model_id)
-    MODELS = [
-        ("imagen-3.0-generate-002",      "imagen",   "v1",    "imagen-3.0-generate-002"),
-        ("imagen-3.0-fast-generate-001", "imagen",   "v1",    "imagen-3.0-fast-generate-001"),
-        ("gemini-2.0-flash-exp",         "gemini",   "v1beta","gemini-2.0-flash-exp"),
-    ]
-
-    for key_idx, key in enumerate(GEMINI_KEYS):
-        for display, mtype, api_ver, model_id in MODELS:
-            print(f"🎨 Trying {display} with key {key_idx + 1}/{len(GEMINI_KEYS)}…")
-            try:
-                img_bytes = _call_gemini_image_model(mtype, api_ver, model_id, key, prompt)
-                if img_bytes:
-                    print(f"✅ Image generated with {display}")
-                    return img_bytes
-            except Exception as e:
-                err = str(e)
-                print(f"   ⚠️  {display} key {key_idx+1} failed: {err[:200]}")
-                if "429" in err or "quota" in err.lower() or "RESOURCE_EXHAUSTED" in err:
-                    time.sleep(15)
-                elif "404" in err:
-                    break  # model doesn't exist on this key tier — skip remaining keys for this model
-    raise RuntimeError("All Gemini image generation attempts exhausted.")
-
-
-def _call_gemini_image_model(mtype: str, api_ver: str, model_id: str,
-                              key: str, prompt: str) -> bytes:
-    if mtype == "gemini":
-        # gemini-2.0-flash-exp: multimodal content generation with image output
-        url = (
-            f"https://generativelanguage.googleapis.com/{api_ver}/models/"
-            f"{model_id}:generateContent?key={key}"
-        )
-        payload = {
-            "contents": [{"parts": [{"text": prompt}]}],
-            "generationConfig": {"responseModalities": ["TEXT", "IMAGE"]},
-        }
-        r = requests.post(url, json=payload, timeout=90)
-        if r.status_code != 200:
-            raise RuntimeError(f"HTTP {r.status_code}: {r.text[:400]}")
-        data = r.json()
-        for candidate in data.get("candidates", []):
-            for part in candidate.get("content", {}).get("parts", []):
-                inline = part.get("inlineData", {})
-                if inline.get("mimeType", "").startswith("image/") and inline.get("data"):
-                    return base64.b64decode(inline["data"])
-        raise RuntimeError(f"No image part in Gemini response: {str(data)[:300]}")
-
-    elif mtype == "imagen":
-        # Imagen 3 — must use v1 (NOT v1beta), uses :predict endpoint
-        url = (
-            f"https://generativelanguage.googleapis.com/{api_ver}/models/"
-            f"{model_id}:predict?key={key}"
-        )
-        payload = {
-            "instances":  [{"prompt": prompt}],
-            "parameters": {
-                "sampleCount":       1,
-                "aspectRatio":       "1:1",
-                "safetyFilterLevel": "block_few",
-                "personGeneration":  "allow_adult",
-            },
-        }
-        r = requests.post(url, json=payload, timeout=90)
-        if r.status_code != 200:
-            raise RuntimeError(f"HTTP {r.status_code}: {r.text[:400]}")
-        data  = r.json()
-        preds = data.get("predictions", [])
-        if preds and preds[0].get("bytesBase64Encoded"):
-            return base64.b64decode(preds[0]["bytesBase64Encoded"])
-        raise RuntimeError(f"No prediction in Imagen response: {str(data)[:300]}")
-
-    raise RuntimeError(f"Unknown model type: {mtype}")
 
 
 def generate_image_with_pollinations(prompt: str) -> bytes:
@@ -703,50 +618,6 @@ def _darken_image_for_editorial(img: Image.Image) -> Image.Image:
     return Image.alpha_composite(img.convert("RGBA"), overlay).convert("RGB")
 
 
-def _restyle_with_gemini(og_bytes: bytes, prompt: str, key: str) -> bytes:
-    """
-    Send the og:image to Gemini vision + ask it to describe what it sees,
-    then use that enriched description for a fresh Imagen generation.
-    This is the 'restyle' path: use article image as creative inspiration.
-    """
-    # Step 1: ask Gemini to describe the og:image visually
-    img_b64 = base64.b64encode(og_bytes).decode()
-    desc_url = (
-        f"https://generativelanguage.googleapis.com/v1beta/models/"
-        f"gemini-2.0-flash:generateContent?key={key}"
-    )
-    desc_payload = {
-        "contents": [{
-            "parts": [
-                {
-                    "inlineData": {
-                        "mimeType": "image/jpeg",
-                        "data": img_b64,
-                    }
-                },
-                {
-                    "text": (
-                        "Describe this image in detail for an image generation prompt: "
-                        "subjects, setting, lighting, colors, mood, composition. "
-                        "Max 60 words. Output only the description, no preamble."
-                    )
-                }
-            ]
-        }]
-    }
-    r = requests.post(desc_url, json=desc_payload, timeout=30)
-    if r.status_code == 200:
-        try:
-            og_desc = r.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
-            print(f"  🔍 og:image described: {og_desc[:80]}…")
-            # Enrich the generation prompt with the actual image content
-            enriched = f"{prompt}\n\nKey visual elements from the article's image: {og_desc}"
-            return enriched
-        except Exception:
-            pass
-    return prompt  # fallback: use original prompt unchanged
-
-
 def fetch_country_repo_image(country_name: str) -> bytes:
     """
     Fetch the pre-stored country background image from the GitHub repo.
@@ -772,63 +643,34 @@ def fetch_country_repo_image(country_name: str) -> bytes:
 
 def get_background_image(source_url: str, title: str, summary: str, country_name: str):
     """
-    Background image pipeline (Smashi editorial style):
-      1. Fetch og:image from article URL (robust browser headers)
-      2. Gemini Imagen/Flash — enriched with og:image description if available
-      3. Pollinations.AI (FLUX.1) — free, no key, no quota
-      4. og:image used directly with dark editorial overlay
-      5. Country repo image (KSA.jpg / UAE.jpg / etc. from GitHub repo root)
-      6. Gradient — absolute last resort
-
-    Goal: always a real photorealistic background, gradient only if everything fails.
+    Background image pipeline:
+      1. og:image from the article itself (primary — always topically relevant,
+         it IS the article's photo). Dark editorial overlay applied.
+      2. Pollinations.AI (FLUX.1) — free, no key, no quota. Prompt is built from
+         the article's actual title/summary so it stays on-topic (backup).
+      3. Country repo image (KSA.jpg / UAE.jpg / etc. from GitHub repo root)
+      4. Gradient — absolute last resort
     """
-    # Build base AI prompt from article content
-    base_prompt = build_image_prompt(title, summary, country_name)
-    print(f"📝 Image prompt (preview): {base_prompt[:100]}…")
-
-    # Step 1: Try to get og:image
+    # Step 1: og:image from the article — primary source, always on-topic
     og_bytes = fetch_og_image_bytes(source_url)
     if og_bytes:
         try:
             og_img = Image.open(io.BytesIO(og_bytes)).convert("RGB")
-            if not is_image_too_light(og_img):
-                print("✅ og:image fetched and accepted as visual reference.")
-            else:
-                print("⚠️  og:image very light but keeping as reference — AI will restyle.")
+            if is_image_too_light(og_img):
+                og_img = _darken_image_for_editorial(og_img)
+            buf = io.BytesIO()
+            og_img.save(buf, "JPEG", quality=92)
+            print("✅ Using article og:image as background.")
+            return buf.getvalue(), "og_image"
         except Exception as e:
-            print(f"⚠️  og:image validation failed: {e}")
-            og_bytes = None
+            print(f"⚠️  og:image decode failed: {e}")
 
-    # Step 2: AI image generation — enriched with og:image description if available
-    print("🎨 Generating AI background image…")
-    final_prompt = base_prompt
-    if og_bytes and GEMINI_KEYS:
-        try:
-            final_prompt = _restyle_with_gemini(og_bytes, base_prompt, GEMINI_KEYS[0])
-        except Exception as e:
-            print(f"⚠️  og:image description failed: {e}")
-
+    # Step 2: Pollinations.AI — built from this article's specific subject
+    print("🌸 No og:image — generating AI background from article content…")
     try:
-        ai_bytes = generate_image_with_gemini(final_prompt)
-        if ai_bytes:
-            try:
-                ai_img = Image.open(io.BytesIO(ai_bytes)).convert("RGB")
-                if is_image_too_light(ai_img):
-                    print("⚠️  AI image extremely light — applying dark overlay.")
-                    ai_img = _darken_image_for_editorial(ai_img)
-                    buf = io.BytesIO()
-                    ai_img.save(buf, "JPEG", quality=92)
-                    ai_bytes = buf.getvalue()
-            except Exception:
-                pass
-            return ai_bytes, "ai_generated"
-    except Exception as e:
-        print(f"⚠️  Gemini image generation failed: {e}")
-
-    # Step 3: Pollinations.AI — free, no key, FLUX.1 quality
-    print("🌸 Falling back to Pollinations.AI…")
-    try:
-        poll_bytes = generate_image_with_pollinations(final_prompt)
+        prompt = build_image_prompt(title, summary, country_name)
+        print(f"📝 Image prompt (preview): {prompt[:100]}…")
+        poll_bytes = generate_image_with_pollinations(prompt)
         if poll_bytes:
             try:
                 poll_img = Image.open(io.BytesIO(poll_bytes)).convert("RGB")
@@ -844,19 +686,7 @@ def get_background_image(source_url: str, title: str, summary: str, country_name
     except Exception as e:
         print(f"⚠️  Pollinations.AI failed: {e}")
 
-    # Step 4: All AI failed — use og:image directly with dark overlay
-    if og_bytes:
-        print("ℹ️  All AI failed — using og:image directly with dark overlay.")
-        try:
-            og_img = Image.open(io.BytesIO(og_bytes)).convert("RGB")
-            og_img = _darken_image_for_editorial(og_img)
-            buf = io.BytesIO()
-            og_img.save(buf, "JPEG", quality=92)
-            return buf.getvalue(), "og_image_darkened"
-        except Exception as e:
-            print(f"⚠️  og:image direct use failed: {e}")
-
-    # Step 5: Country repo image (KSA.jpg / UAE.jpg / etc.)
+    # Step 3: Country repo image (KSA.jpg / UAE.jpg / etc.)
     print(f"🗂  Trying country repo image for {country_name}…")
     try:
         repo_bytes = fetch_country_repo_image(country_name)
@@ -866,7 +696,7 @@ def get_background_image(source_url: str, title: str, summary: str, country_name
     except Exception as e:
         print(f"⚠️  Country repo image failed: {e}")
 
-    # Step 6: everything failed — gradient
+    # Step 4: everything failed — gradient
     print("ℹ️  All image sources exhausted — using country gradient.")
     return None, "gradient"
 
@@ -1211,7 +1041,8 @@ def build_image_headline(title: str, country_name: str) -> str:
         f"- NO emoji whatsoever\n"
         f"- ALL CAPS\n"
         f"- Keep dollar/number amounts exactly as they appear (e.g. $15 BILLION)\n"
-        f"- Keep the core meaning and key names/figures from the original title\n"
+        f"- Keep the core meaning and ALL key names, people, and organizations from the "
+        f"original title — do not generalize a specific name into a generic term\n"
         f"- Output ONLY the headline text. No quotes, no explanation."
     )
 
