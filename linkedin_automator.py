@@ -39,10 +39,10 @@ _FONT_URLS = {
 }
 _font_cache: dict = {}
 
-WHITE     = (255, 255, 255)
-BLACK     = (15,  15,  15)
-ORANGE    = (224, 82,  18)
-BLUE_LINE = (25,  100, 220)
+WHITE        = (255, 255, 255)
+BLACK        = (15,  15,  15)
+ORANGE       = (224, 82,  18)   # Smashi orange: vivid red-orange for accent words
+CARD_BORDER  = (30,  30,  50)   # Near-black dark border (matches Smashi dark outline)
 
 # Two card text colors: black for normal words, orange for impactful words
 PRIMARY_TEXT = BLACK
@@ -298,7 +298,8 @@ def measure(draw, text, font):
 
 
 def word_color(word: str) -> tuple:
-    """Orange for impactful/financial/geo words, black for the rest."""
+    """Orange for impactful/financial/geo words, black for the rest.
+    Works with ALL CAPS text — lowercases before comparing against HIGHLIGHT_WORDS."""
     clean = word.lower().strip(".,!?:;\"'()[]%#@$")
     if any(c.isdigit() for c in clean):
         return ACCENT_TEXT
@@ -660,22 +661,23 @@ def get_background_image(source_url: str, title: str, summary: str, country_name
 def generate_branded_image(bg_bytes, headline: str, country_name: str,
                            logo_bytes=None) -> Image.Image:
     """
-    Compose final 1080×1080 branded image:
-      - Full-bleed dark background (og image / AI image / country gradient)
-      - Heavy bottom vignette
-      - White rounded card with blue border
-      - Title Case headline — two-color (black + orange) per word
-      - Emoji rendered via Noto Color Emoji compositing
-      - Country code pill top-left, logo top-right
+    Compose final 1080×1080 branded image in Smashi Business style:
+      - Full-bleed background (og image / AI image / country gradient)
+      - Heavy bottom-half dark overlay so white card always pops
+      - White rounded card with near-black border (bottom ~40%)
+      - ALL CAPS headline — two-color: black + orange for impactful words
+      - No emoji in card text
+      - Country flag (large ~88px) floating top-left corner on image
+      - Logo top-right
     """
     base = prepare_background(bg_bytes, country_name)
 
-    # Heavy vignette at bottom so white card always pops
+    # Dark overlay over bottom 60% so card always pops
     vignette = Image.new("RGBA", (IMG_W, IMG_H), (0, 0, 0, 0))
     vd = ImageDraw.Draw(vignette)
-    VIGN_H = 520
+    VIGN_H = int(IMG_H * 0.62)
     for i in range(VIGN_H):
-        alpha = int((i / VIGN_H) ** 1.5 * 235)
+        alpha = int((i / VIGN_H) ** 1.4 * 210)
         vd.rectangle(
             [(0, IMG_H - VIGN_H + i), (IMG_W, IMG_H - VIGN_H + i + 1)],
             fill=(0, 0, 0, alpha),
@@ -683,66 +685,68 @@ def generate_branded_image(bg_bytes, headline: str, country_name: str,
     base = Image.alpha_composite(base.convert("RGBA"), vignette).convert("RGB")
     draw = ImageDraw.Draw(base)
 
-    # Card geometry
-    MARGIN   = 36
-    BORDER_W = 6
-    PAD_X    = 56
-    PAD_TOP  = 44
+    # ── CARD GEOMETRY ──────────────────────────────────────────────────────────
+    MARGIN   = 30
+    BORDER_W = 5
+    PAD_X    = 52
+    PAD_TOP  = 48
     PAD_BOT  = 44
     CARD_X   = MARGIN
     CARD_W   = IMG_W - 2 * MARGIN
     TEXT_W   = CARD_W - 2 * PAD_X - 2 * BORDER_W
-    MAX_TEXT_H = int(IMG_H * 0.44)
-    MIN_FONT   = 52
+    MAX_TEXT_H = int(IMG_H * 0.42)
+    MIN_FONT   = 54
 
-    # Headline: Title Case, emoji preserved exactly as returned by AI
-    headline_display = headline.strip()
+    # ALL CAPS, strip any stray emoji
+    segs             = _split_grapheme_clusters(headline.strip())
+    headline_display = "".join(s for t, s in segs if t == "text").strip().upper()
 
     font, lines, fsize, line_h = auto_fit(
-        draw, headline_display, TEXT_W, MAX_TEXT_H, start=92, minimum=MIN_FONT
+        draw, headline_display, TEXT_W, MAX_TEXT_H, start=96, minimum=MIN_FONT
     )
     print(f"  📝 Font: {fsize}px  Lines: {len(lines)}")
 
-    # Load emoji font at matching size
-    e_font = None
-    emoji_font_path = _ensure_font(FONT_EMOJI)
-    if os.path.exists(emoji_font_path):
-        try:
-            e_font = ImageFont.truetype(emoji_font_path, fsize)
-        except Exception as e:
-            print(f"⚠️  Could not load emoji font at size {fsize}: {e}")
+    e_font = None  # No emoji in Smashi-style card
 
     text_block_h = len(lines) * line_h
     inner_h      = PAD_TOP + text_block_h + PAD_BOT
     card_h       = inner_h + 2 * BORDER_W
-    card_y       = IMG_H - MARGIN - card_h
-    if card_y < MARGIN + 150:
-        card_y = MARGIN + 150
 
-    # Drop shadow
-    for s in range(8, 0, -1):
-        draw.rounded_rectangle(
+    CARD_BOTTOM_MARGIN = 30
+    card_y = IMG_H - CARD_BOTTOM_MARGIN - card_h
+    if card_y < MARGIN + 140:
+        card_y = MARGIN + 140
+
+    # Subtle drop shadow
+    for s in range(10, 0, -1):
+        shadow_layer = Image.new("RGBA", (IMG_W, IMG_H), (0, 0, 0, 0))
+        sd = ImageDraw.Draw(shadow_layer)
+        alpha_s = int(160 * (1 - s / 10))
+        sd.rounded_rectangle(
             [CARD_X + s, card_y + s, CARD_X + CARD_W + s, card_y + card_h + s],
-            radius=20, fill=(0, 0, 0),
+            radius=22, fill=(0, 0, 0, alpha_s),
         )
+        base = Image.alpha_composite(base.convert("RGBA"), shadow_layer).convert("RGB")
+        draw = ImageDraw.Draw(base)
 
-    # Blue border
+    # Near-black border (Smashi style)
     draw.rounded_rectangle(
         [CARD_X, card_y, CARD_X + CARD_W, card_y + card_h],
-        radius=20, fill=BLUE_LINE,
+        radius=22, fill=CARD_BORDER,
     )
 
     # White inner card
     draw.rounded_rectangle(
         [CARD_X + BORDER_W, card_y + BORDER_W,
-         CARD_X + CARD_W - BORDER_W, card_y + card_h - BORDER_W],
-        radius=16, fill=WHITE,
+         CARD_X + CARD_W   - BORDER_W, card_y + card_h - BORDER_W],
+        radius=18, fill=WHITE,
     )
 
-    # Draw headline text
+    # ── HEADLINE TEXT (ALL CAPS, black + orange) ────────────────────────────────
     inner_card_x = CARD_X + BORDER_W
     inner_card_w = CARD_W - 2 * BORDER_W
     text_start_y = card_y + BORDER_W + (inner_h - text_block_h) // 2
+
     ty = text_start_y
     for word_list in lines:
         draw_headline_line_centered(
@@ -751,29 +755,38 @@ def generate_branded_image(bg_bytes, headline: str, country_name: str,
         )
         ty += line_h
 
-    # Country code pill — top left
-    country_code = COUNTRY_MAP.get(country_name, {}).get("code", country_name[:3].upper())
-    code_font    = get_font(FONT_BOLD, 26)
-    cw, ch       = measure(draw, country_code, code_font)
-    pill_x, pill_y = 22, 22
-    pill_w, pill_h = cw + 36, ch + 24
-    draw.rounded_rectangle(
-        [pill_x - 2, pill_y - 2, pill_x + pill_w + 2, pill_y + pill_h + 2],
-        radius=14, fill=(20, 20, 20),
-    )
-    draw.rounded_rectangle(
-        [pill_x, pill_y, pill_x + pill_w, pill_y + pill_h],
-        radius=12, fill=WHITE,
-    )
-    draw.text((pill_x + 18, pill_y + 12), country_code, font=code_font, fill=(20, 20, 80))
+    # ── COUNTRY FLAG — large, floating top-left of the image ──────────────────
+    flag_str  = COUNTRY_MAP.get(country_name, {}).get("flag", "")
+    FLAG_SIZE = 88
+    FLAG_X, FLAG_Y = 22, 18
 
-    # Logo — top right
+    if flag_str:
+        emoji_font_path = _ensure_font(FONT_EMOJI)
+        if os.path.exists(emoji_font_path):
+            try:
+                flag_font  = ImageFont.truetype(emoji_font_path, FLAG_SIZE)
+                flag_patch = Image.new("RGBA", (FLAG_SIZE * 3, FLAG_SIZE * 3), (0, 0, 0, 0))
+                fpd = ImageDraw.Draw(flag_patch)
+                fpd.text((0, 0), flag_str, font=flag_font, embedded_color=True)
+                bb  = fpd.textbbox((0, 0), flag_str, font=flag_font)
+                fw  = max(bb[2] - bb[0], 1)
+                fh  = max(bb[3] - bb[1], 1)
+                flag_patch = flag_patch.crop((0, 0, min(fw + 4, FLAG_SIZE * 3), min(fh + 4, FLAG_SIZE * 3)))
+                base.paste(flag_patch, (FLAG_X, FLAG_Y), flag_patch)
+            except Exception as e:
+                print(f"⚠️  Flag render failed: {e}")
+
+    # ── LOGO — top right ───────────────────────────────────────────────────────
+    LOGO_SIZE   = 72
+    LOGO_MARGIN = 18
     if logo_bytes:
         try:
-            logo      = Image.open(io.BytesIO(logo_bytes)).convert("RGBA")
-            logo_size = 110
-            logo      = logo.resize((logo_size, logo_size), Image.LANCZOS)
-            base.paste(logo, (IMG_W - logo_size - 18, 14), logo)
+            logo   = Image.open(io.BytesIO(logo_bytes)).convert("RGBA")
+            logo   = logo.resize((LOGO_SIZE, LOGO_SIZE), Image.LANCZOS)
+            logo_x = IMG_W - LOGO_MARGIN - LOGO_SIZE
+            logo_y = LOGO_MARGIN
+            base.paste(logo, (logo_x, logo_y), logo)
+            draw = ImageDraw.Draw(base)
         except Exception as e:
             print(f"⚠️  Logo paste error: {e}")
 
@@ -944,23 +957,21 @@ def generate_text_with_gemini(prompt: str) -> str:
 
 def build_image_headline(title: str, country_name: str) -> str:
     """
-    Build the image card headline:
-    1. Ask AI for a punchy ≤10-word rewrite with 2 safe emoji placed contextually.
-    2. Validate the result has exactly 2 emoji — if not, enforce deterministically.
-    3. Never use flag emoji or multi-codepoint sequences.
+    Build the image card headline in Smashi style:
+    - ALL CAPS, no emoji
+    - Short, punchy, max 12 words
+    - Key financial/geo words will be highlighted orange by word_color()
     """
-    safe_list = " ".join(PURE_SAFE_EMOJI)
     ai_prompt = (
-        f"Rewrite this article title as a short punchy LinkedIn image card headline.\n"
+        f"Rewrite this article title as a short punchy image card headline.\n"
         f"Original title: {title}\n"
         f"Country: {country_name}\n\n"
         f"STRICT RULES:\n"
-        f"- Maximum 10 words (emoji do not count as words)\n"
-        f"- Include EXACTLY 2 emoji — one at the very start of the headline, one near the end\n"
-        f"- ONLY use emoji from this list (single characters only): {safe_list}\n"
-        f"- Absolutely NO flag emoji, NO emoji with variation selectors, NO joined emoji\n"
-        f"- Keep the core meaning of the original title\n"
-        f"- Title Case (not ALL CAPS)\n"
+        f"- Maximum 12 words\n"
+        f"- NO emoji whatsoever\n"
+        f"- ALL CAPS\n"
+        f"- Keep dollar/number amounts exactly as they appear (e.g. $15 BILLION)\n"
+        f"- Keep the core meaning and key names/figures from the original title\n"
         f"- Output ONLY the headline text. No quotes, no explanation."
     )
 
@@ -973,54 +984,15 @@ def build_image_headline(title: str, country_name: str) -> str:
         except Exception:
             pass
 
-    # Validate and enforce exactly 2 safe emoji
     if raw:
-        # Strip any flag emoji or unsafe sequences the AI might have slipped in
+        # Strip any emoji the AI may have slipped in
         segs    = _split_grapheme_clusters(raw)
-        cleaned = ""
-        for seg_type, seg_text in segs:
-            if seg_type == "emoji":
-                # Only keep if it's a single pure codepoint in our safe list
-                if seg_text in PURE_SAFE_EMOJI:
-                    cleaned += seg_text
-                # else: drop it (flag, ZWJ sequence, etc.)
-            else:
-                cleaned += seg_text
-        cleaned = cleaned.strip()
+        cleaned = "".join(s for t, s in segs if t == "text").strip()
+        if cleaned:
+            return cleaned.upper()
 
-        n_emoji = count_emoji_in(cleaned)
-        title_lower = title.lower()
-
-        if n_emoji == 2:
-            return cleaned  # Perfect
-
-        elif n_emoji == 0:
-            # Prepend + append
-            e1 = pick_emoji_for(title_lower)
-            e2 = pick_emoji_for(title_lower, exclude=e1)
-            return f"{e1} {cleaned} {e2}"
-
-        elif n_emoji == 1:
-            # Find which end is missing emoji and add one
-            e1 = pick_emoji_for(title_lower)
-            if not is_pure_emoji_token(cleaned.split()[0]):
-                return f"{e1} {cleaned}"
-            else:
-                e2 = pick_emoji_for(title_lower, exclude=e1)
-                return f"{cleaned} {e2}"
-
-        else:
-            # Too many emoji — strip all and re-add 2
-            text_only = "".join(s for t, s in _split_grapheme_clusters(cleaned) if t == "text").strip()
-            e1 = pick_emoji_for(title_lower)
-            e2 = pick_emoji_for(title_lower, exclude=e1)
-            return f"{e1} {text_only} {e2}"
-
-    # Hard fallback — title unchanged + 2 emoji
-    title_lower = title.lower()
-    e1 = pick_emoji_for(title_lower)
-    e2 = pick_emoji_for(title_lower, exclude=e1)
-    return f"{e1} {title} {e2}"
+    # Hard fallback — use title in ALL CAPS
+    return title.upper()
 
 
 def generate_post_content(title: str, summary: str, source_url: str,
