@@ -183,8 +183,22 @@ def auto_fit(draw, headline, max_w, max_h, start=90, minimum=34):
 
 
 def draw_colored_line(draw, word_list, font, x, y):
+    """Left-aligned word-by-word colored text (used internally)."""
     sp_w, _ = measure(draw, " ", font)
     cx = x
+    for word in word_list:
+        draw.text((cx, y), word, font=font, fill=word_color(word))
+        w, _ = measure(draw, word, font)
+        cx += w + sp_w
+
+
+def draw_colored_line_centered(draw, word_list, font, card_x, card_w, y):
+    """Center-aligned word-by-word colored text — Smashi style."""
+    sp_w, _ = measure(draw, " ", font)
+    line_text = " ".join(word_list)
+    total_w, _ = measure(draw, line_text, font)
+    start_x = card_x + (card_w - total_w) // 2
+    cx = start_x
     for word in word_list:
         draw.text((cx, y), word, font=font, fill=word_color(word))
         w, _ = measure(draw, word, font)
@@ -438,95 +452,89 @@ def prepare_background(img_bytes, country_name):
 
 def generate_branded_image(bg_bytes, headline, country_name, logo_bytes=None):
     """
-    Compose final 1080×1080 branded image (Smashi Business style):
+    Compose final 1080×1080 branded image — Smashi Business style:
       - Full-bleed dark background (AI photo or country gradient)
-      - Heavy vignette fade at bottom so card always contrasts
-      - White card with LARGE auto-fitting headline (min 58px, start 96px)
-      - Card height auto-expands to fit text — never clips
-      - Per-word orange highlights on key terms (Smashi style)
-      - Thick blue accent bar at card bottom
+      - Heavy bottom vignette so card always pops
+      - White rounded card, auto-height based on text content
+      - THICK blue border OUTLINE around the card (not just a bottom bar)
+      - CENTER-aligned text — large bold ALL-CAPS headline
+      - Per-word orange highlights on key terms
       - Country code pill top-left, logo top-right
     """
     base = prepare_background(bg_bytes, country_name)
 
-    # Vignette — heavy at bottom so card always pops over any photo
+    # ── Heavy vignette at bottom ──
     vignette = Image.new("RGBA", (IMG_W, IMG_H), (0, 0, 0, 0))
     vd = ImageDraw.Draw(vignette)
-    VIGN_H = 500
+    VIGN_H = 520
     for i in range(VIGN_H):
-        alpha = int((i / VIGN_H) ** 1.5 * 230)
+        alpha = int((i / VIGN_H) ** 1.5 * 235)
         vd.rectangle(
             [(0, IMG_H - VIGN_H + i), (IMG_W, IMG_H - VIGN_H + i + 1)],
-            fill=(0, 0, 0, alpha)
+            fill=(0, 0, 0, alpha),
         )
     base = Image.alpha_composite(base.convert("RGBA"), vignette).convert("RGB")
     draw = ImageDraw.Draw(base)
 
-    # ── Card layout constants ──
-    MARGIN     = 28           # gap from image edges
-    PAD_X      = 52           # horizontal text padding inside card
-    PAD_TOP    = 48           # top padding inside card
-    PAD_BOT    = 42           # bottom padding inside card (above blue bar)
-    BLUE_H     = 12           # thick Smashi-style blue accent bar
-    CARD_X     = MARGIN
-    CARD_W     = IMG_W - 2 * MARGIN
-    TEXT_W     = CARD_W - 2 * PAD_X
+    # ── Card geometry ──
+    MARGIN      = 36           # side gap from image edge
+    BORDER_W    = 6            # blue outline border thickness (Smashi style)
+    PAD_X       = 60           # horizontal text padding inside card
+    PAD_TOP     = 44           # top padding inside white area
+    PAD_BOT     = 44           # bottom padding inside white area
+    CARD_X      = MARGIN
+    CARD_W      = IMG_W - 2 * MARGIN
+    TEXT_W      = CARD_W - 2 * PAD_X - 2 * BORDER_W
+    MAX_TEXT_H  = int(IMG_H * 0.46)
+    MIN_FONT    = 58
 
-    # Font sizing: start large (96), never go below 58px — always legible
-    # Max text block uses up to 48% of image height
-    MAX_TEXT_H = int(IMG_H * 0.48)
-    MIN_FONT   = 58
+    # Uppercase for bold news-card impact (Smashi does this)
+    headline_upper = headline.upper()
 
     font, lines, fsize, line_h = auto_fit(
-        draw, headline, TEXT_W, MAX_TEXT_H, start=96, minimum=MIN_FONT
+        draw, headline_upper, TEXT_W, MAX_TEXT_H, start=96, minimum=MIN_FONT
     )
+    print(f"  📝 Font: {fsize}px — {len(lines)} lines")
 
-    # Card height is fully driven by text content — auto-expands for long titles
     text_block_h = len(lines) * line_h
-    card_h       = PAD_TOP + text_block_h + PAD_BOT + BLUE_H
+    inner_h      = PAD_TOP + text_block_h + PAD_BOT
+    card_h       = inner_h + 2 * BORDER_W
     card_y       = IMG_H - MARGIN - card_h
 
-    # Safety: if card would clip off the top, push it down slightly
-    if card_y < MARGIN + 140:   # leave room for logo/pill
-        card_y = MARGIN + 140
+    # Safety: never overlap logo/pill area
+    if card_y < MARGIN + 150:
+        card_y = MARGIN + 150
 
-    # ── Card shadow ──
-    for blur in range(5, 0, -1):
+    # ── Shadow (soft dark drop) ──
+    for s in range(8, 0, -1):
+        alpha = 30 + (8 - s) * 10
+        # Pillow rounded_rectangle fill is opaque — simulate with layered rects
         draw.rounded_rectangle(
-            [CARD_X + blur, card_y + blur,
-             CARD_X + CARD_W + blur, card_y + card_h + blur],
-            radius=22, fill=(0, 0, 0)
+            [CARD_X + s, card_y + s, CARD_X + CARD_W + s, card_y + card_h + s],
+            radius=20, fill=(0, 0, 0),
         )
-    # Solid dark border around card for contrast on any background
-    draw.rounded_rectangle(
-        [CARD_X - 2, card_y - 2, CARD_X + CARD_W + 2, card_y + card_h + 2],
-        radius=22, fill=(20, 20, 20)
-    )
 
-    # ── White card ──
+    # ── Blue border outline (Smashi signature) ──
     draw.rounded_rectangle(
         [CARD_X, card_y, CARD_X + CARD_W, card_y + card_h],
-        radius=20, fill=WHITE
+        radius=20, fill=BLUE_LINE,
     )
 
-    # ── Blue accent bar at bottom of card (Smashi style thick bar) ──
-    bar_top = card_y + card_h - BLUE_H
+    # ── White inner card ──
     draw.rounded_rectangle(
-        [CARD_X, bar_top, CARD_X + CARD_W, card_y + card_h],
-        radius=20, fill=BLUE_LINE
-    )
-    # Clean white rectangle above bar (prevents radius bleed)
-    draw.rectangle(
-        [CARD_X + 1, card_y + 1, CARD_X + CARD_W - 1, bar_top],
-        fill=WHITE
+        [CARD_X + BORDER_W, card_y + BORDER_W,
+         CARD_X + CARD_W - BORDER_W, card_y + card_h - BORDER_W],
+        radius=16, fill=WHITE,
     )
 
-    # ── Headline text — centred vertically in the white area ──
-    text_area_h = card_h - BLUE_H
-    text_start_y = card_y + (text_area_h - text_block_h) // 2
+    # ── CENTER-aligned headline text ──
+    inner_card_x = CARD_X + BORDER_W
+    inner_card_w = CARD_W - 2 * BORDER_W
+    # Vertically center text in white area
+    text_start_y = card_y + BORDER_W + (inner_h - text_block_h) // 2
     ty = text_start_y
     for word_list in lines:
-        draw_colored_line(draw, word_list, font, CARD_X + PAD_X, ty)
+        draw_colored_line_centered(draw, word_list, font, inner_card_x, inner_card_w, ty)
         ty += line_h
 
     # ── Country code pill — top left ──
@@ -812,14 +820,8 @@ def main():
 
     # 3. Build image headline
     title_lower  = (db_title or "").lower()
-    emoji_prefix = (
-        "💰" if any(w in title_lower for w in ["fund","million","billion","invest","raise","raises"]) else
-        "🚀" if any(w in title_lower for w in ["launch","startup","expansion","unveil"]) else
-        "📈" if any(w in title_lower for w in ["growth","economy","gdp","market","record"]) else
-        "🤝" if any(w in title_lower for w in ["partner","sign","deal","acqui","merger"]) else
-        "🌍"
-    )
-    image_headline = f"{emoji_prefix} {(db_title or '').strip()}" if db_title else post_text.split("\n")[0][:100]
+    # NOTE: Pillow cannot render emoji — they show as □. Image headline is plain text only.
+    image_headline = (db_title or "").strip() or post_text.split("\n")[0][:100]
 
     # 4. Get background: og:image → AI-generated → gradient
     bg_bytes, bg_source = get_background_image(
