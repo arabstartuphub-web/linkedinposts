@@ -915,19 +915,22 @@ def generate_text_with_gemini(prompt: str) -> str:
     raise RuntimeError("Gemini text exhausted.")
 
 
-def generate_post_content(title: str, summary: str, source_url: str) -> str:
+def generate_post_content(title: str, summary: str, source_url: str,
+                          country_name: str = "GCC", flag: str = "🌍") -> str:
     prompt = (
         f"Write a LinkedIn post for an Arab startup ecosystem page. Follow this EXACT structure and length:\n\n"
         f"Article title: {title}\n"
-        f"Summary: {summary}\n\n"
+        f"Summary: {summary}\n"
+        f"Country focus: {country_name}\n\n"
         f"STRUCTURE (follow this precisely, max 15 lines total):\n\n"
         f"BLOCK 1 — Hook/Title (2 lines max):\n"
-        f"- Open with a country flag emoji + bold attention-grabbing statement about the news\n"
+        f"- MUST open with exactly this flag emoji: {flag} — do not use any other flag\n"
+        f"- Follow the flag with a bold attention-grabbing statement about the news\n"
         f"- Second line gives one sentence of essential context\n"
         f"- Leave one blank line after\n\n"
         f"BLOCK 2 — Bullet points (5-6 lines):\n"
         f"- A short lead-in sentence ending with a colon (e.g. 'Here is what this means:')\n"
-        f"- Then 4-5 bullet lines, each starting with a relevant contextual emoji (✅ 💡 🚀 💰 🤝 📈 🏙️ ⚡ 🌍 🎯 🔑 etc.)\n"
+        f"- Then 4-5 bullet lines, each starting with a relevant contextual emoji (✅ 💡 🚀 💰 🤝 📈 🏙️ ⚡ 🎯 🔑 etc.)\n"
         f"- Each bullet is ONE short punchy line — no wrapping\n"
         f"- Leave one blank line after\n\n"
         f"BLOCK 3 — Conclusion (2-3 lines):\n"
@@ -937,12 +940,13 @@ def generate_post_content(title: str, summary: str, source_url: str) -> str:
         f"BLOCK 4 — Source link (1 line):\n"
         f"→ Read more: {source_url}\n\n"
         f"BLOCK 5 — Hashtags (1 line):\n"
-        f"- 5-7 tightly relevant lowercase hashtags on one line\n\n"
+        f"- 5-7 tightly relevant lowercase hashtags on one line, include #{country_name.lower().replace(' ', '')}\n\n"
         f"RULES:\n"
         f"- NO markdown, NO asterisks, NO bold formatting\n"
         f"- Plain text only — emojis are fine and required\n"
         f"- Total post must be 15 lines or fewer (blank lines count)\n"
-        f"- Write ONLY about the article above — no invented facts"
+        f"- Write ONLY about the article above — no invented facts\n"
+        f"- CRITICAL: The first character of the post MUST be {flag} — no other flag emoji anywhere in the post"
     )
     print("🚀 Generating post with Groq…")
     try:
@@ -980,34 +984,58 @@ def main():
 
     print(f"📰 Article: {db_title}")
 
-    # 2. Generate LinkedIn post text (now includes emojis)
+    # 2. Generate LinkedIn post text (now includes correct country flag)
     post_text = generate_post_content(
         db_title or summary or country_name,
         summary  or "",
         source_url or "",
+        country_name=country_name,
+        flag=flag,
     )
 
-    # 3. Build image headline
-    # Flag emojis (Regional Indicator pairs) render as tofu boxes in Pillow.
-    # Instead we pick a single-codepoint thematic emoji based on article content
-    # — these render reliably via Noto Color Emoji compositing.
+    # 3. Build image headline — AI rewrites it as a punchy news card headline with 2 emoji
     _headline_base = (db_title or "").strip() or post_text.split("\n")[0][:100]
-    _title_lower   = _headline_base.lower()
-    if any(w in _title_lower for w in ["fund", "invest", "raise", "raised", "million", "billion", "capital", "vc"]):
-        _img_emoji = "💰"
-    elif any(w in _title_lower for w in ["launch", "launch", "debut", "unveil", "new "]):
-        _img_emoji = "🚀"
-    elif any(w in _title_lower for w in ["ipo", "stock", "market", "nasdaq", "exchange"]):
-        _img_emoji = "📈"
-    elif any(w in _title_lower for w in ["ai", "tech", "software", "digital", "platform", "app"]):
-        _img_emoji = "⚡"
-    elif any(w in _title_lower for w in ["partner", "deal", "sign", "agreement", "acqui"]):
-        _img_emoji = "🤝"
-    elif any(w in _title_lower for w in ["accelerat", "startup", "incubat", "founder"]):
-        _img_emoji = "🎯"
-    else:
-        _img_emoji = "🌍"
-    image_headline = f"{_img_emoji} {_headline_base}"
+
+    def _make_image_headline(title: str, country: str) -> str:
+        """Ask AI to produce a short punchy headline with exactly 2 single-codepoint emoji."""
+        _prompt = (
+            f"Rewrite this article title as a punchy LinkedIn image card headline.\n"
+            f"Original title: {title}\n"
+            f"Country focus: {country}\n\n"
+            f"Rules:\n"
+            f"- Maximum 10 words (not counting emoji)\n"
+            f"- Include EXACTLY 2 emoji — one at the very start, one naturally in the middle or end\n"
+            f"- Use ONLY single-character emoji from this safe list: "
+            f"💰 🚀 📈 ⚡ 🤝 🎯 🌍 💡 🏆 🔥 💼 🏙️ 🌐 📊 🎉 ✅ 🔑 💎 🛡️ ⚙️\n"
+            f"- Do NOT use flag emoji (they break rendering)\n"
+            f"- Do NOT use emoji that are made of two characters joined together\n"
+            f"- Output ONLY the headline — no quotes, no explanation, no punctuation at the end"
+        )
+        try:
+            return generate_with_groq(_prompt).strip().strip('"').strip("'")
+        except Exception:
+            try:
+                return generate_text_with_gemini(_prompt).strip().strip('"').strip("'")
+            except Exception:
+                # Hard fallback: pick 2 emoji by keyword and wrap title
+                _title_lower = title.lower()
+                if any(w in _title_lower for w in ["fund", "invest", "raise", "million", "billion"]):
+                    return f"💰 {title} 📈"
+                elif any(w in _title_lower for w in ["launch", "debut", "unveil"]):
+                    return f"🚀 {title} 🎯"
+                elif any(w in _title_lower for w in ["ipo", "stock", "nasdaq"]):
+                    return f"📈 {title} 💰"
+                elif any(w in _title_lower for w in ["ai", "tech", "digital", "platform"]):
+                    return f"⚡ {title} 💡"
+                elif any(w in _title_lower for w in ["partner", "deal", "agreement"]):
+                    return f"🤝 {title} 💼"
+                elif any(w in _title_lower for w in ["accelerat", "startup", "founder"]):
+                    return f"🎯 {title} 🚀"
+                else:
+                    return f"🌍 {title} 💡"
+
+    print("✍️  Generating image headline with emoji…")
+    image_headline = _make_image_headline(_headline_base, country_name)
 
     # 4. Get background: og:image → AI-generated → gradient
     bg_bytes, bg_source = get_background_image(
