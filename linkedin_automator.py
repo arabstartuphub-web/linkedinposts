@@ -25,6 +25,8 @@ GEMINI_KEYS = [k for k in [
     os.environ.get("GEMINI_API_KEY_BACKUP2"),
 ] if k]
 
+POLLINATIONS_API_KEY = os.environ.get("POLLINATIONS_API_KEY")
+
 # ── IMAGE DESIGN ──────────────────────────────────────────────────────────────
 IMG_W, IMG_H = 1080, 1080
 
@@ -43,6 +45,8 @@ WHITE        = (255, 255, 255)
 BLACK        = (15,  15,  15)
 ORANGE       = (224, 82,  18)   # Smashi orange: vivid red-orange for accent words
 CARD_BORDER  = (30,  30,  50)   # Near-black dark border (matches Smashi dark outline)
+NAVY         = (25,  35,  70)   # Headline bar text color (news-card style)
+BOTTOM_BAR   = (18,  22,  38)   # Dark navy/black bottom excerpt panel
 
 # Two card text colors: black for normal words, orange for impactful words
 PRIMARY_TEXT = BLACK
@@ -379,14 +383,14 @@ def wrap_tokens(draw, tokens: list, font, max_w: int) -> list:
 
 
 def auto_fit(draw, headline: str, max_w: int, max_h: int,
-             start: int = 96, minimum: int = 48):
+             start: int = 96, minimum: int = 48, max_lines: int = 5):
     """Find largest font size where text fits in max_w × max_h. Returns (font, lines, size, line_h)."""
     tokens = tokenize_headline(headline)
     for size in range(start, minimum - 1, -2):
         font   = get_font(FONT_BOLD, size)
         lines  = wrap_tokens(draw, tokens, font, max_w)
         line_h = int(size * 1.30)
-        if len(lines) * line_h <= max_h and len(lines) <= 5:
+        if len(lines) * line_h <= max_h and len(lines) <= max_lines:
             return font, lines, size, line_h
     font  = get_font(FONT_BOLD, minimum)
     lines = wrap_tokens(draw, tokens, font, max_w)
@@ -420,6 +424,21 @@ def draw_headline_line_centered(base_img: Image.Image, draw, word_list: list,
             color = word_color(token)
             draw.text((cx, y), token, font=font, fill=color)
             cx += measure_token_width(draw, token, font)
+        if idx < len(word_list) - 1:
+            cx += sp_w
+
+
+def draw_text_line_left(draw, word_list: list, font, x: int, y: int, color: tuple):
+    """
+    Draw one line of tokens left-aligned in a single fixed color (no emoji handling,
+    no per-word highlighting). Used for the headline bar and excerpt panel in the
+    news-card layout.
+    """
+    sp_w = measure(draw, " ", font)[0]
+    cx   = x
+    for idx, token in enumerate(word_list):
+        draw.text((cx, y), token, font=font, fill=color)
+        cx += measure_token_width(draw, token, font)
         if idx < len(word_list) - 1:
             cx += sp_w
 
@@ -485,9 +504,14 @@ def generate_image_with_pollinations(prompt: str) -> bytes:
         f"https://image.pollinations.ai/prompt/{encoded}"
         f"?width=1080&height=1080&model=flux&nologo=true&seed={seed}"
     )
+    if POLLINATIONS_API_KEY:
+        url += f"&token={POLLINATIONS_API_KEY}"
     print(f"🌸 Trying Pollinations.AI (FLUX.1)…")
+    headers = {"User-Agent": "Mozilla/5.0"}
+    if POLLINATIONS_API_KEY:
+        headers["Authorization"] = f"Bearer {POLLINATIONS_API_KEY}"
     try:
-        r = requests.get(url, timeout=120, headers={"User-Agent": "Mozilla/5.0"})
+        r = requests.get(url, timeout=120, headers=headers)
         if r.status_code == 200 and len(r.content) > 10000:
             # Validate it's actually an image
             Image.open(io.BytesIO(r.content)).verify()
@@ -704,112 +728,100 @@ def get_background_image(source_url: str, title: str, summary: str, country_name
 # ── BRANDED IMAGE COMPOSER ────────────────────────────────────────────────────
 
 def generate_branded_image(bg_bytes, headline: str, country_name: str,
-                           logo_bytes=None) -> Image.Image:
+                           logo_bytes=None, bg_source: str = "",
+                           excerpt: str = "") -> Image.Image:
     """
-    Compose final 1080×1080 branded image in Smashi Business style:
-      - Full-bleed background (og image / AI image / country gradient)
-      - Heavy bottom-half dark overlay so white card always pops
-      - White rounded card with near-black border (bottom ~40%)
-      - ALL CAPS headline — two-color: black + orange for impactful words
-      - No emoji in card text
-      - Country flag (large ~88px) floating top-left corner on image
-      - Logo top-right
+    Compose final 1080×1080 branded image in news-card style:
+      - Top bar (white): navy/black headline, sentence case, left-aligned
+      - Middle: clean full-width photo (og image / AI image / country gradient)
+      - Bottom bar (dark navy): white excerpt text, left-aligned
+      - Country flag pill + logo in the top bar
     """
-    base = prepare_background(bg_bytes, country_name)
+    PAD_X = 50
 
-    # Dark overlay over bottom 60% so card always pops
-    vignette = Image.new("RGBA", (IMG_W, IMG_H), (0, 0, 0, 0))
-    vd = ImageDraw.Draw(vignette)
-    VIGN_H = int(IMG_H * 0.62)
-    for i in range(VIGN_H):
-        alpha = int((i / VIGN_H) ** 1.4 * 210)
-        vd.rectangle(
-            [(0, IMG_H - VIGN_H + i), (IMG_W, IMG_H - VIGN_H + i + 1)],
-            fill=(0, 0, 0, alpha),
-        )
-    base = Image.alpha_composite(base.convert("RGBA"), vignette).convert("RGB")
+    # ── TOP HEADLINE BAR ─────────────────────────────────────────────────────
+    TOP_BAR_MAX_H = int(IMG_H * 0.30)
+    TOP_PAD_TOP   = 36
+    TOP_PAD_BOT   = 28
+    HEADLINE_W    = IMG_W - 2 * PAD_X
+
+    base = Image.new("RGB", (IMG_W, IMG_H), WHITE)
     draw = ImageDraw.Draw(base)
 
-    # ── CARD GEOMETRY ──────────────────────────────────────────────────────────
-    MARGIN   = 30
-    BORDER_W = 5
-    PAD_X    = 52
-    PAD_TOP  = 48
-    PAD_BOT  = 44
-    CARD_X   = MARGIN
-    CARD_W   = IMG_W - 2 * MARGIN
-    TEXT_W   = CARD_W - 2 * PAD_X - 2 * BORDER_W
-    MAX_TEXT_H = int(IMG_H * 0.42)
-    MIN_FONT   = 54
-
-    # ALL CAPS, strip any stray emoji
-    segs             = _split_grapheme_clusters(headline.strip())
-    headline_display = "".join(s for t, s in segs if t == "text").strip().upper()
+    headline_clean = "".join(
+        s for t, s in _split_grapheme_clusters(headline.strip()) if t == "text"
+    ).strip()
 
     font, lines, fsize, line_h = auto_fit(
-        draw, headline_display, TEXT_W, MAX_TEXT_H, start=96, minimum=MIN_FONT
+        draw, headline_clean, HEADLINE_W, TOP_BAR_MAX_H - TOP_PAD_TOP - TOP_PAD_BOT,
+        start=72, minimum=40, max_lines=3
     )
-    print(f"  📝 Font: {fsize}px  Lines: {len(lines)}")
-
-    e_font = None  # No emoji in Smashi-style card
+    print(f"  📝 Headline font: {fsize}px  Lines: {len(lines)}")
 
     text_block_h = len(lines) * line_h
-    inner_h      = PAD_TOP + text_block_h + PAD_BOT
-    card_h       = inner_h + 2 * BORDER_W
+    top_bar_h    = TOP_PAD_TOP + text_block_h + TOP_PAD_BOT
 
-    CARD_BOTTOM_MARGIN = 30
-    card_y = IMG_H - CARD_BOTTOM_MARGIN - card_h
-    if card_y < MARGIN + 140:
-        card_y = MARGIN + 140
-
-    # Subtle drop shadow
-    for s in range(10, 0, -1):
-        shadow_layer = Image.new("RGBA", (IMG_W, IMG_H), (0, 0, 0, 0))
-        sd = ImageDraw.Draw(shadow_layer)
-        alpha_s = int(160 * (1 - s / 10))
-        sd.rounded_rectangle(
-            [CARD_X + s, card_y + s, CARD_X + CARD_W + s, card_y + card_h + s],
-            radius=22, fill=(0, 0, 0, alpha_s),
-        )
-        base = Image.alpha_composite(base.convert("RGBA"), shadow_layer).convert("RGB")
-        draw = ImageDraw.Draw(base)
-
-    # Near-black border (Smashi style)
-    draw.rounded_rectangle(
-        [CARD_X, card_y, CARD_X + CARD_W, card_y + card_h],
-        radius=22, fill=CARD_BORDER,
-    )
-
-    # White inner card
-    draw.rounded_rectangle(
-        [CARD_X + BORDER_W, card_y + BORDER_W,
-         CARD_X + CARD_W   - BORDER_W, card_y + card_h - BORDER_W],
-        radius=18, fill=WHITE,
-    )
-
-    # ── HEADLINE TEXT (ALL CAPS, black + orange) ────────────────────────────────
-    inner_card_x = CARD_X + BORDER_W
-    inner_card_w = CARD_W - 2 * BORDER_W
-    text_start_y = card_y + BORDER_W + (inner_h - text_block_h) // 2
-
-    ty = text_start_y
+    ty = TOP_PAD_TOP
     for word_list in lines:
-        draw_headline_line_centered(
-            base, draw, word_list, font, e_font,
-            inner_card_x, inner_card_w, ty
-        )
+        draw_text_line_left(draw, word_list, font, PAD_X, ty, NAVY)
         ty += line_h
 
-    # ── COUNTRY FLAG — large, floating top-left of the image ──────────────────
-    # NotoColorEmoji is a bitmap font: only renders correctly at size 109px.
-    # We render at 109, then scale the patch down to TARGET_SIZE.
-    flag_str     = COUNTRY_MAP.get(country_name, {}).get("flag", "")
-    TARGET_FLAG  = 90   # visual size on the final image (px)
-    NOTO_SIZE    = 109  # NotoColorEmoji's native bitmap size
-    FLAG_X, FLAG_Y = 22, 18
+    # ── BOTTOM EXCERPT BAR ───────────────────────────────────────────────────
+    BOTTOM_BAR_MAX_H = int(IMG_H * 0.28)
+    BOT_PAD_TOP      = 34
+    BOT_PAD_BOT      = 42
+    EXCERPT_W        = IMG_W - 2 * PAD_X
+
+    excerpt_clean = "".join(
+        s for t, s in _split_grapheme_clusters((excerpt or "").strip()) if t == "text"
+    ).strip()
+
+    if excerpt_clean:
+        e_font, e_lines, e_fsize, e_line_h = auto_fit(
+            draw, excerpt_clean, EXCERPT_W, BOTTOM_BAR_MAX_H - BOT_PAD_TOP - BOT_PAD_BOT,
+            start=40, minimum=26, max_lines=4
+        )
+        print(f"  📝 Excerpt font: {e_fsize}px  Lines: {len(e_lines)}")
+        e_text_block_h = len(e_lines) * e_line_h
+        bottom_bar_h   = BOT_PAD_TOP + e_text_block_h + BOT_PAD_BOT
+    else:
+        e_lines, e_line_h, e_font = [], 0, None
+        bottom_bar_h = int(IMG_H * 0.12)
+
+    # ── MIDDLE PHOTO SECTION ─────────────────────────────────────────────────
+    photo_h = IMG_H - top_bar_h - bottom_bar_h
+    photo_h = max(photo_h, int(IMG_H * 0.30))  # ensure photo never collapses
+
+    src = prepare_background(bg_bytes, country_name)  # 1080x1080 square
+    # Crop a horizontal band matching photo_h from the vertical center
+    crop_top = max(0, (IMG_H - photo_h) // 2)
+    photo    = src.crop((0, crop_top, IMG_W, crop_top + photo_h))
+    base.paste(photo, (0, top_bar_h))
+
+    # Recompute bottom bar position (in case photo_h was clamped)
+    bottom_bar_y = top_bar_h + photo_h
+    bottom_bar_h = IMG_H - bottom_bar_y
+
+    draw = ImageDraw.Draw(base)
+    draw.rectangle([0, bottom_bar_y, IMG_W, IMG_H], fill=BOTTOM_BAR)
+
+    ey = bottom_bar_y + BOT_PAD_TOP
+    for word_list in e_lines:
+        draw_text_line_left(draw, word_list, e_font, PAD_X, ey, WHITE)
+        ey += e_line_h
+
+    # ── COUNTRY FLAG — small pill on the photo, top-left ────────────────────
+    # Skip entirely when the background is the country repo image, since
+    # that image already has its own flag/branding baked in.
+    skip_flag_overlay = (bg_source == "country_repo_image")
+
+    flag_str = COUNTRY_MAP.get(country_name, {}).get("flag", "")
+    TARGET_FLAG = 64
+    NOTO_SIZE   = 109
+    FLAG_X, FLAG_Y = PAD_X - 18, top_bar_h + 18
 
     flag_rendered = False
-    if flag_str:
+    if flag_str and not skip_flag_overlay:
         emoji_font_path = _ensure_font(FONT_EMOJI)
         if os.path.exists(emoji_font_path):
             try:
@@ -822,7 +834,6 @@ def generate_branded_image(bg_bytes, headline: str, country_name: str,
                 fw  = max(bb[2] - bb[0], 1)
                 fh  = max(bb[3] - bb[1], 1)
                 flag_patch = flag_patch.crop((0, 0, min(fw + 4, patch_dim), min(fh + 4, patch_dim)))
-                # Scale down to TARGET_FLAG
                 scale      = TARGET_FLAG / max(flag_patch.width, flag_patch.height)
                 new_w      = max(1, int(flag_patch.width  * scale))
                 new_h      = max(1, int(flag_patch.height * scale))
@@ -833,30 +844,27 @@ def generate_branded_image(bg_bytes, headline: str, country_name: str,
             except Exception as e:
                 print(f"⚠️  Flag render failed: {e}")
 
-    if not flag_rendered:
-        # Fallback: draw a colored country-code pill in the top-left
+    if not flag_rendered and not skip_flag_overlay:
         draw = ImageDraw.Draw(base)
         country_code = COUNTRY_MAP.get(country_name, {}).get("code", country_name[:3].upper())
-        pill_font = get_font(FONT_BOLD, 28)
+        pill_font = get_font(FONT_BOLD, 24)
         cw, ch    = measure(draw, country_code, pill_font)
         pill_x, pill_y = FLAG_X, FLAG_Y
-        pill_w, pill_h = cw + 32, ch + 20
+        pill_w, pill_h = cw + 28, ch + 16
         draw.rounded_rectangle([pill_x, pill_y, pill_x + pill_w, pill_y + pill_h],
-                                radius=12, fill=(20, 20, 20))
-        draw.text((pill_x + 16, pill_y + 10), country_code, font=pill_font, fill=WHITE)
+                                radius=10, fill=(20, 20, 20))
+        draw.text((pill_x + 14, pill_y + 8), country_code, font=pill_font, fill=WHITE)
 
-
-    # ── LOGO — top right ───────────────────────────────────────────────────────
-    LOGO_SIZE   = 72
+    # ── LOGO — top-right corner of the photo ────────────────────────────────
+    LOGO_SIZE   = 64
     LOGO_MARGIN = 18
     if logo_bytes:
         try:
             logo   = Image.open(io.BytesIO(logo_bytes)).convert("RGBA")
             logo   = logo.resize((LOGO_SIZE, LOGO_SIZE), Image.LANCZOS)
             logo_x = IMG_W - LOGO_MARGIN - LOGO_SIZE
-            logo_y = LOGO_MARGIN
+            logo_y = top_bar_h + LOGO_MARGIN
             base.paste(logo, (logo_x, logo_y), logo)
-            draw = ImageDraw.Draw(base)
         except Exception as e:
             print(f"⚠️  Logo paste error: {e}")
 
@@ -1027,20 +1035,20 @@ def generate_text_with_gemini(prompt: str) -> str:
 
 def build_image_headline(title: str, country_name: str) -> str:
     """
-    Build the image card headline in Smashi style:
-    - ALL CAPS, no emoji
-    - Short, punchy, max 12 words
-    - Key financial/geo words will be highlighted orange by word_color()
+    Build the image card headline:
+    - Sentence case (like a news chyron), no emoji
+    - Short, punchy, max 16 words
+    - Keeps key names/figures/orgs from the original title
     """
     ai_prompt = (
-        f"Rewrite this article title as a short punchy image card headline.\n"
+        f"Rewrite this article title as a short punchy news headline for an image card.\n"
         f"Original title: {title}\n"
         f"Country: {country_name}\n\n"
         f"STRICT RULES:\n"
-        f"- Maximum 12 words\n"
+        f"- Maximum 16 words\n"
         f"- NO emoji whatsoever\n"
-        f"- ALL CAPS\n"
-        f"- Keep dollar/number amounts exactly as they appear (e.g. $15 BILLION)\n"
+        f"- Sentence case (capitalize only the first word and proper nouns — NOT all caps)\n"
+        f"- Keep dollar/number amounts exactly as they appear (e.g. $15 billion)\n"
         f"- Keep the core meaning and ALL key names, people, and organizations from the "
         f"original title — do not generalize a specific name into a generic term\n"
         f"- Output ONLY the headline text. No quotes, no explanation."
@@ -1060,10 +1068,47 @@ def build_image_headline(title: str, country_name: str) -> str:
         segs    = _split_grapheme_clusters(raw)
         cleaned = "".join(s for t, s in segs if t == "text").strip()
         if cleaned:
-            return cleaned.upper()
+            return cleaned
 
-    # Hard fallback — use title in ALL CAPS
-    return title.upper()
+    # Hard fallback — use title as-is
+    return title.strip()
+
+
+def build_image_excerpt(title: str, summary: str, country_name: str) -> str:
+    """
+    Build a short 1-2 sentence excerpt for the bottom text panel of the image card.
+    Plain sentence case, no emoji, no hashtags — summarizes the article's key takeaway.
+    """
+    ai_prompt = (
+        f"Write a 1-2 sentence summary of this article for an image caption panel.\n"
+        f"Title: {title}\n"
+        f"Summary: {summary or 'No summary available.'}\n"
+        f"Country: {country_name}\n\n"
+        f"STRICT RULES:\n"
+        f"- Maximum 25 words total\n"
+        f"- NO emoji, NO hashtags, NO markdown\n"
+        f"- Sentence case, plain prose\n"
+        f"- Summarize the key takeaway or context of the article\n"
+        f"- Output ONLY the summary text. No quotes, no explanation."
+    )
+
+    raw = None
+    try:
+        raw = generate_with_groq(ai_prompt).strip().strip('"\'')
+    except Exception:
+        try:
+            raw = generate_text_with_gemini(ai_prompt).strip().strip('"\'')
+        except Exception:
+            pass
+
+    if raw:
+        segs    = _split_grapheme_clusters(raw)
+        cleaned = "".join(s for t, s in segs if t == "text").strip()
+        if cleaned:
+            return cleaned
+
+    # Hard fallback — use summary or title
+    return (summary or title).strip()
 
 
 def generate_post_content(title: str, summary: str, source_url: str,
@@ -1162,11 +1207,16 @@ def main():
         flag=flag,
     )
 
-    # 3. Build image headline with exactly 2 safe emoji (deterministically enforced)
+    # 3. Build image headline (sentence case, deterministically enforced)
     print("✍️  Building image headline…")
     _headline_base = (db_title or "").strip() or post_text.splitlines()[0][:100]
     image_headline = build_image_headline(_headline_base, country_name)
     print(f"  Headline: {image_headline}")
+
+    # 3b. Build short excerpt for the bottom panel
+    print("✍️  Building image excerpt…")
+    image_excerpt = build_image_excerpt(_headline_base, summary or "", country_name)
+    print(f"  Excerpt: {image_excerpt}")
 
     # 4. Get background: og:image → AI → gradient
     bg_bytes, bg_source = get_background_image(
@@ -1184,7 +1234,9 @@ def main():
 
     # 6. Compose branded image
     print("🎨 Composing branded image…")
-    branded_img = generate_branded_image(bg_bytes, image_headline, country_name, logo_bytes)
+    branded_img = generate_branded_image(
+        bg_bytes, image_headline, country_name, logo_bytes, bg_source, image_excerpt
+    )
 
     # 7. Upload to GitHub
     filename      = f"post_{country_data['code']}_{datetime.now(timezone.utc).strftime('%Y%m%d')}.jpg"
