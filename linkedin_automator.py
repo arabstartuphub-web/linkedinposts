@@ -168,75 +168,123 @@ def measure(draw, text, font):
     return bb[2] - bb[0], bb[3] - bb[1]
 
 
-def _is_emoji(char: str) -> bool:
-    """Return True if the character is an emoji codepoint."""
-    cp = ord(char)
+def _is_emoji_cp(cp: int) -> bool:
+    """Return True if a single codepoint is emoji-range."""
     return (
-        0x1F300 <= cp <= 0x1FAFF or  # Misc symbols, emoticons, transport, etc.
-        0x2600  <= cp <= 0x27BF or   # Misc symbols & dingbats
-        0x1F000 <= cp <= 0x1F02F or  # Mahjong / domino
-        0x1F0A0 <= cp <= 0x1F0FF or  # Playing cards
-        0xFE00  <= cp <= 0xFE0F or   # Variation selectors
-        0x200D == cp                  # Zero-width joiner
+        0x1F300 <= cp <= 0x1FAFF or
+        0x2600  <= cp <= 0x27BF  or
+        0x1F000 <= cp <= 0x1F02F or
+        0x1F0A0 <= cp <= 0x1F0FF or
+        0xFE00  <= cp <= 0xFE0F  or
+        cp == 0x200D              or   # ZWJ
+        0x1F1E0 <= cp <= 0x1F1FF       # Regional Indicators (flag pairs)
     )
+
+
+def _split_grapheme_clusters(text: str):
+    """
+    Split text into (type, cluster) tuples where type is 'emoji' or 'text'.
+    Handles multi-codepoint sequences: flag pairs (RI+RI), ZWJ sequences,
+    skin-tone modifiers, and variation selectors.
+    Returns list of ('text'|'emoji', str).
+    """
+    segments = []
+    buf      = ""
+    chars    = list(text)
+    i        = 0
+    while i < len(chars):
+        cp = ord(chars[i])
+
+        # Regional Indicator pair → flag emoji (e.g. 🇧🇭 = RI_B + RI_H)
+        if 0x1F1E0 <= cp <= 0x1F1FF and i + 1 < len(chars) and 0x1F1E0 <= ord(chars[i+1]) <= 0x1F1FF:
+            if buf:
+                segments.append(("text", buf))
+                buf = ""
+            segments.append(("emoji", chars[i] + chars[i+1]))
+            i += 2
+            continue
+
+        # ZWJ sequence — greedily consume until no more ZWJ
+        if _is_emoji_cp(cp):
+            if buf:
+                segments.append(("text", buf))
+                buf = ""
+            cluster = chars[i]
+            i += 1
+            # Absorb variation selector + ZWJ continuations
+            while i < len(chars):
+                ncp = ord(chars[i])
+                if ncp == 0x200D or 0xFE00 <= ncp <= 0xFE0F or 0x1F3FB <= ncp <= 0x1F3FF:
+                    cluster += chars[i]
+                    i += 1
+                    # After ZWJ absorb the next base emoji too
+                    if ncp == 0x200D and i < len(chars) and _is_emoji_cp(ord(chars[i])):
+                        cluster += chars[i]
+                        i += 1
+                else:
+                    break
+            segments.append(("emoji", cluster))
+            continue
+
+        buf += chars[i]
+        i   += 1
+
+    if buf:
+        segments.append(("text", buf))
+    return segments
+
+
+def strip_emoji(text: str) -> str:
+    """Remove all emoji clusters from text, leaving only plain characters."""
+    return "".join(s for t, s in _split_grapheme_clusters(text) if t == "text")
 
 
 def draw_text_with_emoji(base_img: Image.Image, xy: tuple, text: str,
                          font, fill, emoji_size: int = None):
     """
     Draw text with emoji support by compositing Noto Color Emoji glyphs inline.
-    Falls back to plain draw.text() if the emoji font is unavailable.
+    Falls back gracefully if the emoji font is unavailable or Pillow is too old.
     """
     emoji_font_path = _ensure_font(FONT_EMOJI)
-    if not os.path.exists(emoji_font_path):
-        # No emoji font — draw plain text
-        draw = ImageDraw.Draw(base_img)
-        draw.text(xy, text, font=font, fill=fill)
-        return
+    has_emoji_font  = os.path.exists(emoji_font_path)
 
-    # Split text into emoji / non-emoji segments
-    segments = []
-    buf = ""
-    for ch in text:
-        if _is_emoji(ch):
-            if buf:
-                segments.append(("text", buf))
-                buf = ""
-            segments.append(("emoji", ch))
-        else:
-            buf += ch
-    if buf:
-        segments.append(("text", buf))
-
+    segments = _split_grapheme_clusters(text)
     draw     = ImageDraw.Draw(base_img)
     x, y     = xy
     e_size   = emoji_size or (font.size if hasattr(font, "size") else 64)
-    try:
-        e_font = ImageFont.truetype(emoji_font_path, e_size)
-    except Exception:
-        draw.text(xy, text, font=font, fill=fill)
-        return
+
+    e_font = None
+    if has_emoji_font:
+        try:
+            e_font = ImageFont.truetype(emoji_font_path, e_size)
+        except Exception:
+            pass
 
     for seg_type, seg_text in segments:
         if seg_type == "text":
-            draw.text((x, y), seg_text, font=font, fill=fill)
-            bb = draw.textbbox((x, y), seg_text, font=font)
-            x  = bb[2]
+            if seg_text:
+                draw.text((x, y), seg_text, font=font, fill=fill)
+                bb = draw.textbbox((x, y), seg_text, font=font)
+                x  = bb[2]
         else:
-            # Render emoji via Noto Color Emoji onto a small RGBA patch
+            # Emoji cluster
+            if e_font is None:
+                # No emoji font — skip the glyph but advance cursor
+                x += e_size
+                continue
             try:
-                patch = Image.new("RGBA", (e_size * 2, e_size * 2), (0, 0, 0, 0))
+                patch = Image.new("RGBA", (e_size * 3, e_size * 3), (0, 0, 0, 0))
                 pd    = ImageDraw.Draw(patch)
                 pd.text((0, 0), seg_text, font=e_font, embedded_color=True)
-                # Crop to actual glyph
-                bb_patch = pd.textbbox((0, 0), seg_text, font=e_font)
-                glyph_w  = max(bb_patch[2] - bb_patch[0], 1)
-                glyph_h  = max(bb_patch[3] - bb_patch[1], 1)
-                patch    = patch.crop((0, 0, glyph_w + 4, glyph_h + 4))
-                base_img.paste(patch, (int(x), int(y)), patch)
-                x += glyph_w + 4
+                bb_p  = pd.textbbox((0, 0), seg_text, font=e_font)
+                gw    = max(bb_p[2] - bb_p[0], 1)
+                gh    = max(bb_p[3] - bb_p[1], 1)
+                patch = patch.crop((0, 0, gw + 4, gh + 4))
+                # Vertical center-align emoji with the text line
+                ey = int(y + (font.size - gh) // 2) if hasattr(font, "size") else int(y)
+                base_img.paste(patch, (int(x), ey), patch)
+                x += gw + 4
             except Exception:
-                # Pillow too old for embedded_color — skip emoji silently
                 x += e_size
 
 
@@ -939,9 +987,27 @@ def main():
         source_url or "",
     )
 
-    # 3. Build image headline — include country flag emoji prefix
-    # Noto Color Emoji is used at render-time to composite emoji glyphs
-    image_headline = f"{flag} " + ((db_title or "").strip() or post_text.split("\n")[0][:100])
+    # 3. Build image headline
+    # Flag emojis (Regional Indicator pairs) render as tofu boxes in Pillow.
+    # Instead we pick a single-codepoint thematic emoji based on article content
+    # — these render reliably via Noto Color Emoji compositing.
+    _headline_base = (db_title or "").strip() or post_text.split("\n")[0][:100]
+    _title_lower   = _headline_base.lower()
+    if any(w in _title_lower for w in ["fund", "invest", "raise", "raised", "million", "billion", "capital", "vc"]):
+        _img_emoji = "💰"
+    elif any(w in _title_lower for w in ["launch", "launch", "debut", "unveil", "new "]):
+        _img_emoji = "🚀"
+    elif any(w in _title_lower for w in ["ipo", "stock", "market", "nasdaq", "exchange"]):
+        _img_emoji = "📈"
+    elif any(w in _title_lower for w in ["ai", "tech", "software", "digital", "platform", "app"]):
+        _img_emoji = "⚡"
+    elif any(w in _title_lower for w in ["partner", "deal", "sign", "agreement", "acqui"]):
+        _img_emoji = "🤝"
+    elif any(w in _title_lower for w in ["accelerat", "startup", "incubat", "founder"]):
+        _img_emoji = "🎯"
+    else:
+        _img_emoji = "🌍"
+    image_headline = f"{_img_emoji} {_headline_base}"
 
     # 4. Get background: og:image → AI-generated → gradient
     bg_bytes, bg_source = get_background_image(
