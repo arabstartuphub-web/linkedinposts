@@ -548,6 +548,29 @@ def is_image_too_light(img: Image.Image,
     return ratio > light_fraction
 
 
+def fetch_image_bytes_from_url(url: str):
+    """Download raw image bytes from a direct image URL (e.g. articles.image_url
+    already resolved by the website's scraper). Returns None on any failure —
+    caller should fall back to the next source in the pipeline."""
+    if not url or not url.startswith("http"):
+        return None
+    HEADERS = {
+        "User-Agent": (
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/124.0.0.0 Safari/537.36"
+        ),
+    }
+    try:
+        res = requests.get(url, timeout=15, headers=HEADERS, allow_redirects=True)
+        if res.status_code == 200 and len(res.content) > 5000:
+            return res.content
+        print(f"⚠️  DB image_url fetch failed or too small: {res.status_code}, {len(res.content)} bytes")
+    except Exception as e:
+        print(f"⚠️  DB image_url fetch error: {e}")
+    return None
+
+
 def fetch_og_image_bytes(url: str):
     if not url:
         return None
@@ -665,17 +688,35 @@ def fetch_country_repo_image(country_name: str) -> bytes:
         raise RuntimeError(f"Country repo image fetch failed: {e}")
 
 
-def get_background_image(source_url: str, title: str, summary: str, country_name: str):
+def get_background_image(source_url: str, title: str, summary: str, country_name: str, db_image_url: str = ""):
     """
     Background image pipeline:
-      1. og:image from the article itself (primary — always topically relevant,
-         it IS the article's photo). Dark editorial overlay applied.
+      0. image_url already stored on the article by the website's scraper
+         (its own og:image / feed-image / in-article-image fallback chain —
+         reuse it directly instead of re-fetching).
+      1. og:image from the article itself (primary fallback — always topically
+         relevant, it IS the article's photo). Dark editorial overlay applied.
       2. Pollinations.AI (FLUX.1) — free, no key, no quota. Prompt is built from
          the article's actual title/summary so it stays on-topic (backup).
       3. Country repo image (KSA.jpg / UAE.jpg / etc. from GitHub repo root)
       4. Gradient — absolute last resort
     """
-    # Step 1: og:image from the article — primary source, always on-topic
+    # Step 0: image already resolved by the website's scraper — top priority
+    if db_image_url:
+        db_bytes = fetch_image_bytes_from_url(db_image_url)
+        if db_bytes:
+            try:
+                db_img = Image.open(io.BytesIO(db_bytes)).convert("RGB")
+                if is_image_too_light(db_img):
+                    db_img = _darken_image_for_editorial(db_img)
+                buf = io.BytesIO()
+                db_img.save(buf, "JPEG", quality=92)
+                print("✅ Using website DB image_url as background.")
+                return buf.getvalue(), "db_image_url"
+            except Exception as e:
+                print(f"⚠️  DB image_url decode failed: {e}")
+
+    # Step 1: og:image from the article — fallback if DB had no image, still on-topic
     og_bytes = fetch_og_image_bytes(source_url)
     if og_bytes:
         try:
@@ -915,7 +956,7 @@ def get_daily_article(country_name: str):
     cur  = conn.cursor()
     cur.execute(
         """
-        SELECT id, title, summary, source_url
+        SELECT id, title, summary, source_url, image_url
         FROM   articles
         WHERE  linkedin_posted = FALSE AND country = %s
         ORDER  BY published_at DESC
@@ -928,7 +969,7 @@ def get_daily_article(country_name: str):
         print(f"No unposted articles for {country_name}. Trying GCC pool…")
         cur.execute(
             """
-            SELECT id, title, summary, source_url
+            SELECT id, title, summary, source_url, image_url
             FROM   articles
             WHERE  linkedin_posted = FALSE AND country = 'GCC'
             ORDER  BY published_at DESC
@@ -1187,6 +1228,7 @@ def main():
     # 1. Get article
     article    = get_daily_article(country_name)
     article_id = None
+    db_image_url = ""
     if not article:
         print(f"No DB articles for {country_name}. Fetching from NewsAPI…")
         db_title, summary, source_url = fetch_live_article(country_name)
@@ -1194,7 +1236,7 @@ def main():
             print("NewsAPI returned nothing. Exiting.")
             sys.exit(0)
     else:
-        article_id, db_title, summary, source_url = article
+        article_id, db_title, summary, source_url, db_image_url = article
 
     print(f"📰 Article: {db_title}")
 
@@ -1218,9 +1260,9 @@ def main():
     image_excerpt = build_image_excerpt(_headline_base, summary or "", country_name)
     print(f"  Excerpt: {image_excerpt}")
 
-    # 4. Get background: og:image → AI → gradient
+    # 4. Get background: DB image_url → og:image → AI → country repo → gradient
     bg_bytes, bg_source = get_background_image(
-        source_url, db_title or "", summary or "", country_name
+        source_url, db_title or "", summary or "", country_name, db_image_url
     )
     print(f"🖼  Background: {bg_source}")
 
