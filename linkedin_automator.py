@@ -946,6 +946,22 @@ def upload_image_to_github(img: Image.Image, filename: str) -> str:
 
 
 # ── DATABASE ──────────────────────────────────────────────────────────────────
+# Schema contract — columns referenced below must stay in sync with:
+#   arabstartuphub-web/website → lib/db/src/schema/articles.ts (Drizzle)
+#
+# Columns used by this script:
+#   id              INTEGER   primary key
+#   title           TEXT
+#   summary         TEXT
+#   source_url      TEXT
+#   image_url       TEXT      populated by the website's 4-tier scraper
+#   published_at    TIMESTAMPTZ
+#   country         TEXT      values: 'Saudi Arabia' | 'UAE' | 'Qatar' |
+#                             'Kuwait' | 'Oman' | 'Bahrain' | 'GCC'
+#   linkedin_posted BOOLEAN   default FALSE
+#
+# ⚠️  If any column is renamed in the Drizzle schema, update the queries
+#     below (bare psycopg2 — no type safety, breaks silently at runtime).
 
 def get_country_for_today() -> str:
     return WEEKDAY_COUNTRY.get(datetime.now(timezone.utc).weekday(), "GCC")
@@ -953,43 +969,62 @@ def get_country_for_today() -> str:
 
 def get_daily_article(country_name: str):
     conn = psycopg2.connect(DB_URL)
-    cur  = conn.cursor()
-    cur.execute(
-        """
-        SELECT id, title, summary, source_url, image_url
-        FROM   articles
-        WHERE  linkedin_posted = FALSE AND country = %s
-        ORDER  BY published_at DESC
-        LIMIT  1;
-        """,
-        (country_name,),
-    )
-    row = cur.fetchone()
-    if not row and country_name != "GCC":
-        print(f"No unposted articles for {country_name}. Trying GCC pool…")
-        cur.execute(
-            """
-            SELECT id, title, summary, source_url, image_url
-            FROM   articles
-            WHERE  linkedin_posted = FALSE AND country = 'GCC'
-            ORDER  BY published_at DESC
-            LIMIT  1;
-            """
-        )
-        row = cur.fetchone()
-    cur.close()
-    conn.close()
-    return row
+    try:
+        with conn.cursor() as cur:
+            # ── Log per-country article inventory so we can see if rotation is decorative ──
+            cur.execute(
+                """
+                SELECT country, COUNT(*) AS unposted
+                FROM   articles
+                WHERE  linkedin_posted = FALSE
+                GROUP  BY country
+                ORDER  BY unposted DESC;
+                """
+            )
+            counts = cur.fetchall()
+            if counts:
+                summary_str = ", ".join(f"{c}: {n}" for c, n in counts)
+                print(f"  📊 Unposted article inventory — {summary_str}")
+            else:
+                print("  📊 Unposted article inventory — all empty")
+
+            cur.execute(
+                """
+                SELECT id, title, summary, source_url, image_url
+                FROM   articles
+                WHERE  linkedin_posted = FALSE AND country = %s
+                ORDER  BY published_at DESC
+                LIMIT  1;
+                """,
+                (country_name,),
+            )
+            row = cur.fetchone()
+            if not row and country_name != "GCC":
+                print(f"No unposted articles for {country_name}. Trying GCC pool…")
+                cur.execute(
+                    """
+                    SELECT id, title, summary, source_url, image_url
+                    FROM   articles
+                    WHERE  linkedin_posted = FALSE AND country = 'GCC'
+                    ORDER  BY published_at DESC
+                    LIMIT  1;
+                    """
+                )
+                row = cur.fetchone()
+            return row
+    finally:
+        conn.close()
 
 
 def mark_article_posted(article_id: int):
     conn = psycopg2.connect(DB_URL)
-    cur  = conn.cursor()
-    cur.execute("UPDATE articles SET linkedin_posted = TRUE WHERE id = %s;", (article_id,))
-    conn.commit()
-    cur.close()
-    conn.close()
-    print(f"✅ Article {article_id} marked as posted.")
+    try:
+        with conn.cursor() as cur:
+            cur.execute("UPDATE articles SET linkedin_posted = TRUE WHERE id = %s;", (article_id,))
+        conn.commit()
+        print(f"✅ Article {article_id} marked as posted.")
+    finally:
+        conn.close()
 
 
 def fetch_live_article(country_name: str):
@@ -1029,10 +1064,16 @@ def generate_with_groq(prompt: str) -> str:
         raise ValueError("GROQ_API_KEY missing.")
     url     = "https://api.groq.com/openai/v1/chat/completions"
     headers = {"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"}
+    # max_tokens scoped per call-site via a sentinel in the prompt prefix;
+    # default 500 covers the LinkedIn post (≤15 lines). Headline/excerpt
+    # callers pass shorter prompts but the model honours the cap regardless.
+    _max_tokens = 150 if prompt.startswith("Rewrite this article title") or \
+                         prompt.startswith("Write a 1-2 sentence summary") else 500
     payload = {
         "model":       "llama-3.3-70b-versatile",
         "messages":    [{"role": "user", "content": prompt}],
         "temperature": 0.7,
+        "max_tokens":  _max_tokens,
     }
     for attempt in range(3):
         try:
@@ -1098,11 +1139,14 @@ def build_image_headline(title: str, country_name: str) -> str:
     raw = None
     try:
         raw = generate_with_groq(ai_prompt).strip().strip('"\'')
-    except Exception:
+        print("  [headline] Provider: Groq ✅")
+    except Exception as e:
+        print(f"  [headline] Groq failed: {e} — falling back to Gemini…")
         try:
             raw = generate_text_with_gemini(ai_prompt).strip().strip('"\'')
-        except Exception:
-            pass
+            print("  [headline] Provider: Gemini ✅")
+        except Exception as e2:
+            print(f"  [headline] ❌ Gemini also failed: {e2} — using hard fallback (raw title).")
 
     if raw:
         # Strip any emoji the AI may have slipped in
@@ -1112,6 +1156,7 @@ def build_image_headline(title: str, country_name: str) -> str:
             return cleaned
 
     # Hard fallback — use title as-is
+    print("  [headline] ⚠️  Using raw title as fallback.")
     return title.strip()
 
 
@@ -1136,11 +1181,14 @@ def build_image_excerpt(title: str, summary: str, country_name: str) -> str:
     raw = None
     try:
         raw = generate_with_groq(ai_prompt).strip().strip('"\'')
-    except Exception:
+        print("  [excerpt] Provider: Groq ✅")
+    except Exception as e:
+        print(f"  [excerpt] Groq failed: {e} — falling back to Gemini…")
         try:
             raw = generate_text_with_gemini(ai_prompt).strip().strip('"\'')
-        except Exception:
-            pass
+            print("  [excerpt] Provider: Gemini ✅")
+        except Exception as e2:
+            print(f"  [excerpt] ❌ Gemini also failed: {e2} — using hard fallback (summary/title).")
 
     if raw:
         segs    = _split_grapheme_clusters(raw)
@@ -1149,6 +1197,7 @@ def build_image_excerpt(title: str, summary: str, country_name: str) -> str:
             return cleaned
 
     # Hard fallback — use summary or title
+    print("  [excerpt] ⚠️  Using summary/title as fallback.")
     return (summary or title).strip()
 
 
