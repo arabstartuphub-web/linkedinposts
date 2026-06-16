@@ -630,33 +630,55 @@ def fetch_og_image_bytes(url: str):
     return None
 
 
-def make_gradient_bg(country_name: str) -> Image.Image:
+def make_gradient_bg(country_name: str, width: int = IMG_W, height: int = IMG_H) -> Image.Image:
     top, bot = COUNTRY_GRADIENTS.get(country_name, ((18, 18, 60), (5, 5, 28)))
-    img = Image.new("RGB", (IMG_W, IMG_H))
+    img = Image.new("RGB", (width, height))
     px  = img.load()
-    for y in range(IMG_H):
-        t = y / IMG_H
+    for y in range(height):
+        t = y / height
         r = int(top[0] + (bot[0] - top[0]) * t)
         g = int(top[1] + (bot[1] - top[1]) * t)
         b = int(top[2] + (bot[2] - top[2]) * t)
-        for x in range(IMG_W):
+        for x in range(width):
             px[x, y] = (r, g, b)
     return img
 
 
-def prepare_background(img_bytes, country_name: str) -> Image.Image:
+def fit_cover(img: Image.Image, target_w: int, target_h: int) -> Image.Image:
+    """
+    Resize+crop img to exactly (target_w, target_h) the way CSS object-fit: cover
+    works — scale so the image fully covers the target box, then trim only the
+    minimum excess from whichever dimension overshoots, centered. This avoids
+    forcing a square crop on a wide/landscape source before fitting it into a
+    short, wide band (which would needlessly chop off the left/right edges).
+    """
+    src_w, src_h = img.size
+    if src_w <= 0 or src_h <= 0:
+        return img.resize((target_w, target_h), Image.LANCZOS)
+    target_ratio = target_w / target_h
+    src_ratio    = src_w / src_h
+    if src_ratio > target_ratio:
+        # Source is relatively wider than the target → crop the sides.
+        new_w = max(1, round(src_h * target_ratio))
+        left  = (src_w - new_w) // 2
+        img   = img.crop((left, 0, left + new_w, src_h))
+    else:
+        # Source is relatively taller than the target → crop top/bottom.
+        new_h = max(1, round(src_w / target_ratio))
+        top   = (src_h - new_h) // 2
+        img   = img.crop((0, top, src_w, top + new_h))
+    return img.resize((target_w, target_h), Image.LANCZOS)
+
+
+def prepare_background(img_bytes, country_name: str,
+                       target_w: int = IMG_W, target_h: int = IMG_H) -> Image.Image:
     if img_bytes:
         try:
-            base  = Image.open(io.BytesIO(img_bytes)).convert("RGB")
-            bw, bh = base.size
-            side  = min(bw, bh)
-            left  = (bw - side) // 2
-            top   = (bh - side) // 2
-            base  = base.crop((left, top, left + side, top + side))
-            return base.resize((IMG_W, IMG_H), Image.LANCZOS)
+            base = Image.open(io.BytesIO(img_bytes)).convert("RGB")
+            return fit_cover(base, target_w, target_h)
         except Exception as e:
             print(f"⚠️  Background decode failed: {e}")
-    return make_gradient_bg(country_name)
+    return make_gradient_bg(country_name, target_w, target_h)
 
 
 def _darken_image_for_editorial(img: Image.Image) -> Image.Image:
@@ -833,10 +855,9 @@ def generate_branded_image(bg_bytes, headline: str, country_name: str,
     photo_h = IMG_H - top_bar_h - bottom_bar_h
     photo_h = max(photo_h, int(IMG_H * 0.30))  # ensure photo never collapses
 
-    src = prepare_background(bg_bytes, country_name)  # 1080x1080 square
-    # Crop a horizontal band matching photo_h from the vertical center
-    crop_top = max(0, (IMG_H - photo_h) // 2)
-    photo    = src.crop((0, crop_top, IMG_W, crop_top + photo_h))
+    # Cover-crop the source directly to the actual photo band size, so wide
+    # source images keep their full width instead of being pre-squared first.
+    photo = prepare_background(bg_bytes, country_name, IMG_W, photo_h)
     base.paste(photo, (0, top_bar_h))
 
     # Recompute bottom bar position (in case photo_h was clamped)
