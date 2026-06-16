@@ -791,7 +791,7 @@ def generate_branded_image(bg_bytes, headline: str, country_name: str,
 
     headline_clean = "".join(
         s for t, s in _split_grapheme_clusters(headline.strip()) if t == "text"
-    ).strip()
+    ).strip().upper()
 
     font, lines, fsize, line_h = auto_fit(
         draw, headline_clean, HEADLINE_W, TOP_BAR_MAX_H - TOP_PAD_TOP - TOP_PAD_BOT,
