@@ -1,8 +1,8 @@
 name: Scheduled LinkedIn Automation
 
 on:
-  schedule:
-    - cron: '0 6 * * *'
+  # schedule:
+  #   - cron: '0 6 * * *'   # disabled — cron-job.org now triggers this workflow at 10:00 AM Asia/Riyadh
   workflow_dispatch:
 
 jobs:
