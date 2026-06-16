@@ -1184,19 +1184,22 @@ def build_image_headline(title: str, country_name: str) -> str:
 def build_image_excerpt(title: str, summary: str, country_name: str) -> str:
     """
     Build a short 1-2 sentence excerpt for the bottom text panel of the image card.
-    Plain sentence case, no emoji, no hashtags — summarizes the article's key takeaway.
+    Plain sentence case, no emoji, no hashtags — adds context beyond the headline.
+    Must never repeat or paraphrase the headline shown in the top bar.
     """
+    content_hint = summary.strip() if summary and summary.strip() else ""
+
     ai_prompt = (
-        f"Write a 1-2 sentence summary of this article for an image caption panel.\n"
-        f"Title: {title}\n"
-        f"Summary: {summary or 'No summary available.'}\n"
+        f"Write a 1-2 sentence caption for the bottom panel of a LinkedIn image card.\n"
+        f"Headline (already shown at the top — DO NOT repeat or paraphrase it): {title}\n"
+        f"{'Article summary: ' + content_hint if content_hint else 'No article body available — infer context from the headline.'}\n"
         f"Country: {country_name}\n\n"
         f"STRICT RULES:\n"
         f"- Maximum 25 words total\n"
         f"- NO emoji, NO hashtags, NO markdown\n"
         f"- Sentence case, plain prose\n"
-        f"- Summarize the key takeaway or context of the article\n"
-        f"- Output ONLY the summary text. No quotes, no explanation."
+        f"- Must NOT restate or paraphrase the headline — add context, implication, or background instead\n"
+        f"- Output ONLY the caption text. No quotes, no explanation."
     )
 
     raw = None
@@ -1209,7 +1212,7 @@ def build_image_excerpt(title: str, summary: str, country_name: str) -> str:
             raw = generate_text_with_gemini(ai_prompt).strip().strip('"\'')
             print("  [excerpt] Provider: Gemini ✅")
         except Exception as e2:
-            print(f"  [excerpt] ❌ Gemini also failed: {e2} — using hard fallback (summary/title).")
+            print(f"  [excerpt] ❌ Gemini also failed: {e2} — using hard fallback.")
 
     if raw:
         segs    = _split_grapheme_clusters(raw)
@@ -1217,9 +1220,13 @@ def build_image_excerpt(title: str, summary: str, country_name: str) -> str:
         if cleaned:
             return cleaned
 
-    # Hard fallback — use summary or title
-    print("  [excerpt] ⚠️  Using summary/title as fallback.")
-    return (summary or title).strip()
+    # Hard fallback — use truncated summary if available, otherwise a generic country line.
+    # NEVER fall back to title — that would duplicate the top headline bar.
+    print("  [excerpt] ⚠️  Using hard fallback.")
+    if content_hint:
+        # Truncate cleanly at a word boundary within 120 chars
+        return content_hint[:120].rsplit(" ", 1)[0]
+    return f"The latest from the {country_name} startup ecosystem."
 
 
 def generate_post_content(title: str, summary: str, source_url: str,
