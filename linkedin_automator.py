@@ -5,7 +5,7 @@ import base64
 import io
 import requests
 import psycopg2
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta, date
 from html.parser import HTMLParser
 from PIL import Image, ImageDraw, ImageFont
 
@@ -790,7 +790,67 @@ def get_background_image(source_url: str, title: str, summary: str, country_name
 
 # ── BRANDED IMAGE COMPOSER ────────────────────────────────────────────────────
 
-def generate_branded_image(bg_bytes, headline: str, country_name: str,
+def get_accent_color(country_name: str) -> tuple:
+    """Bright accent color derived from each country's gradient, used for
+    kicker labels, tabs, and bars in the rotating weekly templates."""
+    base = COUNTRY_GRADIENTS.get(country_name, ((200, 160, 40), (80, 60, 10)))[0]
+    return tuple(min(255, int(c * 1.9) + 50) for c in base)
+
+
+def _clean_text(text: str, upper: bool = False) -> str:
+    out = "".join(
+        s for t, s in _split_grapheme_clusters((text or "").strip()) if t == "text"
+    ).strip()
+    return out.upper() if upper else out
+
+
+def _draw_flag_or_pill(base, draw, country_name, x, y, dark_bg=True):
+    """Small flag/country-code badge. Returns (width, height) used."""
+    flag_str = COUNTRY_MAP.get(country_name, {}).get("flag", "")
+    if flag_str:
+        emoji_font_path = _ensure_font(FONT_EMOJI)
+        if os.path.exists(emoji_font_path):
+            try:
+                NOTO_SIZE, TARGET = 90, 52
+                flag_font = ImageFont.truetype(emoji_font_path, NOTO_SIZE)
+                patch_dim = NOTO_SIZE * 3
+                patch = Image.new("RGBA", (patch_dim, patch_dim), (0, 0, 0, 0))
+                pd = ImageDraw.Draw(patch)
+                pd.text((0, 0), flag_str, font=flag_font, embedded_color=True)
+                bb = pd.textbbox((0, 0), flag_str, font=flag_font)
+                fw, fh = max(bb[2] - bb[0], 1), max(bb[3] - bb[1], 1)
+                patch = patch.crop((0, 0, min(fw + 4, patch_dim), min(fh + 4, patch_dim)))
+                scale = TARGET / max(patch.width, patch.height)
+                nw, nh = max(1, int(patch.width * scale)), max(1, int(patch.height * scale))
+                patch = patch.resize((nw, nh), Image.LANCZOS)
+                base.paste(patch, (x, y), patch)
+                return nw, nh
+            except Exception:
+                pass
+    code = COUNTRY_MAP.get(country_name, {}).get("code", country_name[:3].upper())
+    pf = get_font(FONT_BOLD, 22)
+    cw, ch = measure(draw, code, pf)
+    pw, ph = cw + 24, ch + 14
+    fill = (20, 20, 20) if dark_bg else (250, 250, 250)
+    txt_c = WHITE if dark_bg else BLACK
+    draw.rounded_rectangle([x, y, x + pw, y + ph], radius=9, fill=fill)
+    draw.text((x + 12, y + 7), code, font=pf, fill=txt_c)
+    return pw, ph
+
+
+def _paste_logo(base, logo_bytes, x, y, size=60):
+    if not logo_bytes:
+        return
+    try:
+        logo = Image.open(io.BytesIO(logo_bytes)).convert("RGBA").resize((size, size), Image.LANCZOS)
+        base.paste(logo, (x, y), logo)
+    except Exception as e:
+        print(f"⚠️  Logo paste error: {e}")
+
+
+# ── TEMPLATE 1: EDITORIAL (white headline bar / photo / dark excerpt bar) ────
+
+def generate_branded_image_editorial(bg_bytes, headline: str, country_name: str,
                            logo_bytes=None, bg_source: str = "",
                            excerpt: str = "") -> Image.Image:
     """
@@ -931,6 +991,338 @@ def generate_branded_image(bg_bytes, headline: str, country_name: str,
             print(f"⚠️  Logo paste error: {e}")
 
     return base
+
+
+# ── TEMPLATE 2: BOLD OVERLAY (full-bleed photo + gradient + big white headline) ─
+
+def _region_luminance_and_color(img: Image.Image, box: tuple) -> tuple:
+    """Sample a region of img and return (luminance 0-255, avg_rgb_color).
+    Used to decide how strong a text-legibility overlay needs to be, and to
+    derive an overlay tint that matches the photo instead of looking like a
+    flat unrelated black bar."""
+    crop = img.crop(box).resize((24, 24), Image.LANCZOS).convert("RGB")
+    pixels = list(crop.getdata())
+    n = len(pixels)
+    r = sum(p[0] for p in pixels) / n
+    g = sum(p[1] for p in pixels) / n
+    b = sum(p[2] for p in pixels) / n
+    luminance = (r * 299 + g * 587 + b * 114) / 1000
+    return luminance, (int(r), int(g), int(b))
+
+
+def generate_branded_image_overlay(bg_bytes, headline: str, country_name: str,
+                                     logo_bytes=None, bg_source: str = "",
+                                     excerpt: str = "") -> Image.Image:
+    PAD_X = 56
+    accent = get_accent_color(country_name)
+    photo = prepare_background(bg_bytes, country_name, IMG_W, IMG_H)
+    base = photo.convert("RGB")
+    draw = ImageDraw.Draw(base)
+
+    # Gradient overlay rising from the bottom ~58% of the image, behind the
+    # headline/excerpt. By default this stays light and mostly see-through
+    # (~30% opacity at its strongest point) so the photo reads through
+    # clearly — the overlay's own tint is sampled from the photo itself
+    # (darkened), so it blends in rather than reading as a flat black bar.
+    # If the photo's text zone is light/white (where white text would
+    # otherwise vanish), the opacity automatically steps up just enough to
+    # keep the headline legible.
+    grad_top = int(IMG_H * 0.42)
+    text_zone_box = (0, grad_top, IMG_W, IMG_H)
+    luminance, avg_color = _region_luminance_and_color(base, text_zone_box)
+    overlay_color = tuple(max(0, int(c * 0.22)) for c in avg_color)
+
+    peak_alpha = 0.30  # default: gentle, ~30% transparent blend
+    if luminance > 195:
+        peak_alpha = 0.68   # near-white background — needs real contrast
+    elif luminance > 160:
+        peak_alpha = 0.48   # bright-ish background — partial boost
+    print(f"  💡 [overlay] Text-zone luminance: {luminance:.0f} → gradient peak alpha {peak_alpha:.2f}")
+
+    overlay_h = IMG_H - grad_top
+    overlay = Image.new("L", (1, overlay_h), color=0)
+    for i in range(overlay_h):
+        overlay.putpixel((0, i), int(255 * peak_alpha * (i / overlay_h) ** 1.4))
+    overlay = overlay.resize((IMG_W, overlay_h))
+    dark = Image.new("RGB", (IMG_W, overlay_h), overlay_color)
+    base.paste(Image.composite(dark, base.crop((0, grad_top, IMG_W, IMG_H)), overlay),
+               (0, grad_top))
+    draw = ImageDraw.Draw(base)
+
+    # Kicker label top-left
+    kicker_font = get_font(FONT_BOLD, 26)
+    kicker = "ARABIAN STARTUP ECOSYSTEM"
+    kw, kh = measure(draw, kicker, kicker_font)
+    draw.rounded_rectangle([PAD_X - 16, 40, PAD_X - 16 + kw + 32, 40 + kh + 22],
+                            radius=8, fill=accent)
+    draw.text((PAD_X, 51), kicker, font=kicker_font, fill=(15, 15, 15))
+
+    _paste_logo(base, logo_bytes, IMG_W - 56 - 18, 40, size=56)
+
+    # Headline near the bottom, bold white, ALL CAPS
+    headline_clean = _clean_text(headline, upper=True)
+    max_h = int(IMG_H * 0.34)
+    font, lines, fsize, line_h = auto_fit(draw, headline_clean, IMG_W - 2 * PAD_X,
+                                           max_h, start=78, minimum=42, max_lines=3)
+    print(f"  📝 [overlay] Headline font: {fsize}px  Lines: {len(lines)}")
+
+    excerpt_clean = _clean_text(excerpt)
+    e_font, e_lines, e_fsize, e_line_h = (None, [], 0, 0)
+    if excerpt_clean:
+        e_font, e_lines, e_fsize, e_line_h = auto_fit(draw, excerpt_clean, IMG_W - 2 * PAD_X,
+                                                        110, start=32, minimum=24, max_lines=2)
+
+    total_text_h = len(lines) * line_h + (16 + len(e_lines) * e_line_h if e_lines else 0)
+    ty = IMG_H - 64 - total_text_h
+    for word_list in lines:
+        draw_text_line_left(draw, word_list, font, PAD_X, ty, WHITE)
+        ty += line_h
+    if e_lines:
+        ty += 12
+        draw.rectangle([PAD_X, ty + 4, PAD_X + 64, ty + 8], fill=accent)
+        ty += 20
+        for word_list in e_lines:
+            draw_text_line_left(draw, word_list, e_font, PAD_X, ty, (225, 225, 230))
+            ty += e_line_h
+
+    return base
+
+
+# ── TEMPLATE 3: SPLIT BLOCK (solid color header block + photo + footer strip) ──
+
+def generate_branded_image_split(bg_bytes, headline: str, country_name: str,
+                                   logo_bytes=None, bg_source: str = "",
+                                   excerpt: str = "") -> Image.Image:
+    PAD_X = 56
+    accent = get_accent_color(country_name)
+    block_dark = COUNTRY_GRADIENTS.get(country_name, ((20, 20, 20), (10, 10, 10)))[1]
+    block_color = tuple(min(255, c + 14) for c in block_dark)
+
+    base = Image.new("RGB", (IMG_W, IMG_H), block_color)
+    draw = ImageDraw.Draw(base)
+
+    BLOCK_H = int(IMG_H * 0.40)
+    FOOTER_H = 64
+    draw.rectangle([0, 0, IMG_W, BLOCK_H], fill=block_color)
+    draw.rectangle([0, 0, 16, BLOCK_H], fill=accent)  # left accent tab
+
+    kicker_font = get_font(FONT_BOLD, 24)
+    draw.text((PAD_X, 44), "STARTUP NEWS · GCC", font=kicker_font, fill=accent)
+
+    headline_clean = _clean_text(headline, upper=True)
+    font, lines, fsize, line_h = auto_fit(draw, headline_clean, IMG_W - 2 * PAD_X,
+                                           BLOCK_H - 130, start=64, minimum=36, max_lines=3)
+    print(f"  📝 [split] Headline font: {fsize}px  Lines: {len(lines)}")
+    ty = 92
+    for word_list in lines:
+        draw_text_line_left(draw, word_list, font, PAD_X, ty, WHITE)
+        ty += line_h
+
+    pw, ph = _draw_flag_or_pill(base, draw, country_name, IMG_W - 130, 40, dark_bg=False)
+    _paste_logo(base, logo_bytes, IMG_W - 64 - 18, BLOCK_H - 64 - 18, size=64)
+
+    # Photo fills the middle
+    photo_h = IMG_H - BLOCK_H - FOOTER_H
+    photo = prepare_background(bg_bytes, country_name, IMG_W, photo_h)
+    base.paste(photo, (0, BLOCK_H))
+
+    # Footer strip — excerpt as a single caption line + handle
+    draw.rectangle([0, IMG_H - FOOTER_H, IMG_W, IMG_H], fill=block_color)
+    excerpt_clean = _clean_text(excerpt)
+    foot_font = get_font(FONT_MEDIUM, 24)
+    handle_text = "@ArabianStartupEco"
+    handle_w, _ = measure(draw, handle_text, foot_font)
+    handle_x = IMG_W - PAD_X - handle_w
+    if excerpt_clean:
+        # Truncate to one tidy line for the slim footer, leaving room for the handle
+        words, line = excerpt_clean.split(), ""
+        max_w = handle_x - PAD_X - 40
+        for word in words:
+            test = (line + " " + word).strip()
+            tw, _ = measure(draw, test, foot_font)
+            if tw > max_w:
+                line = line.rstrip() + "…"
+                break
+            line = test
+        draw.text((PAD_X, IMG_H - FOOTER_H + 18), line, font=foot_font, fill=(225, 225, 230))
+    draw.text((handle_x, IMG_H - FOOTER_H + 18), handle_text, font=foot_font, fill=accent)
+
+    return base
+
+
+# ── TEMPLATE 4: QUOTE SPLIT (photo top + dark tag box / light excerpt box) ───
+
+def generate_branded_image_quote(bg_bytes, headline: str, country_name: str,
+                                   logo_bytes=None, bg_source: str = "",
+                                   excerpt: str = "") -> Image.Image:
+    PAD_X = 50
+    accent = get_accent_color(country_name)
+
+    PHOTO_H = int(IMG_H * 0.56)
+    photo = prepare_background(bg_bytes, country_name, IMG_W, PHOTO_H)
+    base = Image.new("RGB", (IMG_W, IMG_H), WHITE)
+    base.paste(photo, (0, 0))
+    draw = ImageDraw.Draw(base)
+
+    _draw_flag_or_pill(base, draw, country_name, PAD_X - 14, PHOTO_H - 60, dark_bg=True)
+    _paste_logo(base, logo_bytes, IMG_W - 56 - 18, 18, size=56)
+
+    # Headline sits as a white card overlapping the photo/white boundary
+    headline_clean = _clean_text(headline, upper=True)
+    BOX_TOP = PHOTO_H
+    LABEL_W = int(IMG_W * 0.33)
+
+    remaining_h = IMG_H - BOX_TOP
+    draw.rectangle([0, BOX_TOP, LABEL_W, IMG_H], fill=(18, 18, 22))
+    draw.rectangle([LABEL_W, BOX_TOP, IMG_W, IMG_H], fill=(246, 245, 241))
+
+    label_font = get_font(FONT_BOLD, 30)
+    label_text = COUNTRY_MAP.get(country_name, {}).get("code", "GCC")
+    draw.text((36, BOX_TOP + 36), "STARTUP", font=get_font(FONT_MEDIUM, 22), fill=accent)
+    draw.text((36, BOX_TOP + 64), label_text, font=label_font, fill=WHITE)
+    draw.rectangle([36, BOX_TOP + 116, 36 + 64, BOX_TOP + 120], fill=accent)
+
+    # Right box: headline rendered as a pull-quote (its main "statement"),
+    # with the article excerpt as smaller supporting text underneath —
+    # so both the headline and the description show up, matching the
+    # furniture-sample's quote-card structure but carrying real article info.
+    right_x = LABEL_W + PAD_X
+    right_w = IMG_W - LABEL_W - 2 * PAD_X
+    quote_text = f"“{_clean_text(headline)}”"
+    excerpt_clean = _clean_text(excerpt)
+
+    quote_max_h = int(remaining_h * (0.62 if excerpt_clean else 0.8))
+    q_font, q_lines, q_fsize, q_line_h = auto_fit(
+        draw, quote_text, right_w, quote_max_h, start=40, minimum=24, max_lines=5
+    )
+    print(f"  📝 [quote] Headline font: {q_fsize}px  Lines: {len(q_lines)}")
+    q_block_h = len(q_lines) * q_line_h
+
+    e_lines, e_line_h, e_font = [], 0, None
+    if excerpt_clean:
+        e_font, e_lines, e_fsize, e_line_h = auto_fit(
+            draw, excerpt_clean, right_w, remaining_h - q_block_h - 60,
+            start=26, minimum=20, max_lines=3
+        )
+        print(f"  📝 [quote] Excerpt font: {e_fsize}px  Lines: {len(e_lines)}")
+
+    e_block_h = len(e_lines) * e_line_h
+    total_h = q_block_h + (28 if e_lines else 0) + e_block_h
+    ey = BOX_TOP + (remaining_h - total_h) // 2
+    for word_list in q_lines:
+        draw_text_line_left(draw, word_list, q_font, right_x, ey, (24, 24, 28))
+        ey += q_line_h
+    if e_lines:
+        ey += 16
+        draw.rectangle([right_x, ey, right_x + 48, ey + 4], fill=accent)
+        ey += 22
+        for word_list in e_lines:
+            draw_text_line_left(draw, word_list, e_font, right_x, ey, (95, 95, 100))
+            ey += e_line_h
+        ey += e_line_h
+
+    return base
+
+
+# ── TEMPLATE 5: FRAMED MINIMAL (dark header block + white-framed photo) ─────
+
+def generate_branded_image_framed(bg_bytes, headline: str, country_name: str,
+                                    logo_bytes=None, bg_source: str = "",
+                                    excerpt: str = "") -> Image.Image:
+    PAD_X = 56
+    accent = get_accent_color(country_name)
+    block_dark = COUNTRY_GRADIENTS.get(country_name, ((20, 20, 20), (10, 10, 10)))[1]
+    header_color = tuple(min(255, c + 10) for c in block_dark)
+
+    HEADER_H = int(IMG_H * 0.36)
+    base = Image.new("RGB", (IMG_W, IMG_H), WHITE)
+    draw = ImageDraw.Draw(base)
+    draw.rectangle([0, 0, IMG_W, HEADER_H], fill=header_color)
+
+    kicker_font = get_font(FONT_MEDIUM, 26)
+    draw.text((PAD_X, 40), "new on the radar", font=kicker_font, fill=(210, 210, 215))
+
+    headline_clean = _clean_text(headline, upper=True)
+    font, lines, fsize, line_h = auto_fit(draw, headline_clean, IMG_W - 2 * PAD_X,
+                                           HEADER_H - 150, start=66, minimum=36, max_lines=3)
+    print(f"  📝 [framed] Headline font: {fsize}px  Lines: {len(lines)}")
+    ty = 92
+    for word_list in lines:
+        draw_text_line_left(draw, word_list, font, PAD_X, ty, WHITE)
+        ty += line_h
+    ty += 14
+    draw.rectangle([PAD_X, ty, PAD_X + 90, ty + 10], fill=accent)
+
+    _paste_logo(base, logo_bytes, IMG_W - 64 - PAD_X, 36, size=58)
+
+    # White-framed photo below the header
+    FRAME_MARGIN = 46
+    frame_x0, frame_y0 = FRAME_MARGIN, HEADER_H + 36
+    frame_x1, frame_y1 = IMG_W - FRAME_MARGIN, IMG_H - 110
+    photo = prepare_background(bg_bytes, country_name, frame_x1 - frame_x0, frame_y1 - frame_y0)
+    base.paste(photo, (frame_x0, frame_y0))
+    draw.rectangle([frame_x0, frame_y0, frame_x1, frame_y1], outline=WHITE, width=10)
+
+    _draw_flag_or_pill(base, draw, country_name, frame_x0 + 16, frame_y0 + 16, dark_bg=True)
+
+    excerpt_clean = _clean_text(excerpt)
+    if excerpt_clean:
+        foot_font = get_font(FONT_MEDIUM, 26)
+        words, line, w = excerpt_clean.split(), "", 0
+        max_w = IMG_W - 2 * PAD_X
+        for word in words:
+            test = (line + " " + word).strip()
+            tw, _ = measure(draw, test, foot_font)
+            if tw > max_w:
+                line = line.rstrip() + "…"
+                break
+            line = test
+        draw.text((PAD_X, frame_y1 + 26), line, font=foot_font, fill=(40, 40, 45))
+
+    return base
+
+
+# ── 4-WEEK TEMPLATE ROTATION ─────────────────────────────────────────────────
+# Weeks run Sunday → Saturday. Every day inside a given week uses the SAME
+# template, then the whole template switches for the next week, cycling
+# through 4 styles before repeating. This keeps each week visually cohesive
+# (so the LinkedIn/FB/IG grid for that week reads as one consistent "season")
+# while the look still refreshes regularly. Country accent colors (from
+# COUNTRY_GRADIENTS, keyed by the day's country) still vary day-to-day inside
+# the week, so Sunday→Saturday isn't perfectly identical either.
+WEEK_TEMPLATE_CYCLE = [
+    generate_branded_image_overlay,   # Week 1 — Bold Overlay   (Sample 1 style)
+    generate_branded_image_split,     # Week 2 — Split Block    (Sample 2 style)
+    generate_branded_image_quote,     # Week 3 — Quote Split    (Sample 3 style)
+    generate_branded_image_framed,    # Week 4 — Framed Minimal (Sample 4 style)
+]
+
+# Reference epoch: a known Sunday. Week-cycle position is computed relative
+# to this date so the rotation is stable and deterministic across runs,
+# regardless of when the workflow happens to execute.
+_CYCLE_EPOCH_SUNDAY = date(2024, 1, 7)
+
+
+def get_week_cycle_index(dt: date) -> int:
+    """Return 0-3 indicating which of the 4 templates applies to dt's
+    Sunday-to-Saturday week."""
+    # Python's weekday(): Mon=0 … Sun=6. Shift so Sunday=0 … Saturday=6.
+    days_since_sunday = (dt.weekday() + 1) % 7
+    week_start_sunday = dt - timedelta(days=days_since_sunday)
+    weeks_elapsed = (week_start_sunday - _CYCLE_EPOCH_SUNDAY).days // 7
+    return weeks_elapsed % len(WEEK_TEMPLATE_CYCLE)
+
+
+def generate_branded_image(bg_bytes, headline: str, country_name: str,
+                            logo_bytes=None, bg_source: str = "",
+                            excerpt: str = "") -> Image.Image:
+    """Dispatch to this week's template (Sun–Sat cycle, 4 templates rotating)."""
+    today = datetime.now(timezone.utc).date()
+    idx = get_week_cycle_index(today)
+    template_fn = WEEK_TEMPLATE_CYCLE[idx]
+    print(f"  🎨 Week-cycle slot {idx + 1}/4 → template: {template_fn.__name__}")
+    return template_fn(bg_bytes, headline, country_name,
+                        logo_bytes=logo_bytes, bg_source=bg_source, excerpt=excerpt)
 
 
 # ── GITHUB UPLOAD ─────────────────────────────────────────────────────────────
