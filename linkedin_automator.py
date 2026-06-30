@@ -984,11 +984,51 @@ def upload_image_to_github(img: Image.Image, filename: str) -> str:
 # ⚠️  If any column is renamed in the Drizzle schema, update the queries
 #     below (bare psycopg2 — no type safety, breaks silently at runtime).
 
+# Keywords used to identify articles that are strictly about the startup
+# ecosystem (funding, founders, accelerators, VC, etc.) vs. general business/
+# political news about a country. Matched against title + summary, case-insensitive.
+STARTUP_KEYWORDS = [
+    "startup", "start-up", "founder", "co-founder", "entrepreneur",
+    "funding", "fundraise", "fundraising", "seed round", "series a",
+    "series b", "series c", "pre-seed", "venture capital", "vc fund",
+    "investor", "investment round", "valuation", "unicorn", "ipo",
+    "acquisition", "acquired", "merger", "incubator", "accelerator",
+    "venture studio", "angel investor", "pitch", "scale-up", "scaleup",
+    "tech ecosystem", "fintech", "proptech", "healthtech", "edtech",
+    "agritech", "e-commerce startup", "saas", "app launch",
+]
+
+
+def _startup_topic_filter_sql():
+    """
+    Build a parameterized SQL ILIKE OR-chain across title/summary for
+    STARTUP_KEYWORDS. Returns (sql_fragment, params_tuple).
+    """
+    clauses = []
+    params  = []
+    for kw in STARTUP_KEYWORDS:
+        clauses.append("(title ILIKE %s OR summary ILIKE %s)")
+        like = f"%{kw}%"
+        params.extend([like, like])
+    return " OR ".join(clauses), tuple(params)
+
+
 def get_country_for_today() -> str:
     return WEEKDAY_COUNTRY.get(datetime.now(timezone.utc).weekday(), "GCC")
 
 
 def get_daily_article(country_name: str):
+    """
+    Article selection cascade (strict order — each step only runs if the
+    previous one found nothing):
+      1. Unposted article in `country_name` that matches startup-ecosystem
+         keywords (title/summary) — strictly on-topic.
+      2. Unposted article in `country_name`, any topic (not yet posted).
+      3. Unposted article in the 'GCC' pool that matches startup keywords.
+      4. Unposted article in the 'GCC' pool, any topic.
+    If all four return nothing, main() falls through to the NewsAPI live
+    fallback — that happens outside this function.
+    """
     conn = psycopg2.connect(DB_URL)
     try:
         with conn.cursor() as cur:
@@ -1009,6 +1049,27 @@ def get_daily_article(country_name: str):
             else:
                 print("  📊 Unposted article inventory — all empty")
 
+            topic_sql, topic_params = _startup_topic_filter_sql()
+
+            # Step 1: country + startup-topic match
+            cur.execute(
+                f"""
+                SELECT id, title, summary, source_url, image_url
+                FROM   articles
+                WHERE  linkedin_posted = FALSE AND country = %s
+                       AND ({topic_sql})
+                ORDER  BY published_at DESC
+                LIMIT  1;
+                """,
+                (country_name, *topic_params),
+            )
+            row = cur.fetchone()
+            if row:
+                print(f"✅ Step 1: startup-topic article found for {country_name}.")
+                return row
+
+            # Step 2: country, any topic
+            print(f"⚠️  No startup-topic article for {country_name}. Trying any unposted article in {country_name}…")
             cur.execute(
                 """
                 SELECT id, title, summary, source_url, image_url
@@ -1020,18 +1081,46 @@ def get_daily_article(country_name: str):
                 (country_name,),
             )
             row = cur.fetchone()
-            if not row and country_name != "GCC":
-                print(f"No unposted articles for {country_name}. Trying GCC pool…")
-                cur.execute(
-                    """
-                    SELECT id, title, summary, source_url, image_url
-                    FROM   articles
-                    WHERE  linkedin_posted = FALSE AND country = 'GCC'
-                    ORDER  BY published_at DESC
-                    LIMIT  1;
-                    """
-                )
-                row = cur.fetchone()
+            if row:
+                print(f"✅ Step 2: non-startup-topic article found for {country_name}.")
+                return row
+
+            if country_name == "GCC":
+                # Already searched the GCC pool above — nothing left in DB.
+                return None
+
+            # Step 3: GCC pool + startup-topic match
+            print(f"⚠️  No unposted articles at all for {country_name}. Trying GCC pool (startup topic)…")
+            cur.execute(
+                f"""
+                SELECT id, title, summary, source_url, image_url
+                FROM   articles
+                WHERE  linkedin_posted = FALSE AND country = 'GCC'
+                       AND ({topic_sql})
+                ORDER  BY published_at DESC
+                LIMIT  1;
+                """,
+                topic_params,
+            )
+            row = cur.fetchone()
+            if row:
+                print("✅ Step 3: startup-topic article found in GCC pool.")
+                return row
+
+            # Step 4: GCC pool, any topic
+            print("⚠️  No startup-topic article in GCC pool. Trying any unposted GCC article…")
+            cur.execute(
+                """
+                SELECT id, title, summary, source_url, image_url
+                FROM   articles
+                WHERE  linkedin_posted = FALSE AND country = 'GCC'
+                ORDER  BY published_at DESC
+                LIMIT  1;
+                """
+            )
+            row = cur.fetchone()
+            if row:
+                print("✅ Step 4: non-startup-topic article found in GCC pool.")
             return row
     finally:
         conn.close()
