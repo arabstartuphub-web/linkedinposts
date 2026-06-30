@@ -1447,7 +1447,15 @@ def main():
     )
 
     # 7. Upload to GitHub
-    filename      = f"post_{country_data['code']}_{datetime.now(timezone.utc).strftime('%Y%m%d')}.jpg"
+    # IMPORTANT: filename must be unique per run/article. A date-only filename
+    # (e.g. post_UAE_20260630.jpg) gets overwritten by any later run the same
+    # day, which can cause a different platform's webhook (e.g. LinkedIn via
+    # Make.com, if it fetches the image slightly later than Facebook/Instagram)
+    # to pick up a stale image from an unrelated article. Include article_id
+    # and a full timestamp (down to the second) to guarantee no collisions.
+    run_stamp = datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')
+    article_tag = str(article_id) if article_id is not None else "live"
+    filename = f"post_{country_data['code']}_{article_tag}_{run_stamp}.jpg"
     thumbnail_url = upload_image_to_github(branded_img, filename)
 
     # 8. Send to Make.com webhook
