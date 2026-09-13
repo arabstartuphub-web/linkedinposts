@@ -27,6 +27,10 @@ GEMINI_KEYS = [k for k in [
 
 POLLINATIONS_API_KEY = os.environ.get("POLLINATIONS_API_KEY")
 
+# Active production models
+GROQ_MODELS = ["openai/gpt-oss-120b", "openai/gpt-oss-20b", "llama-3.1-8b-instant"]
+GEMINI_MODELS = ["gemini-2.5-flash", "gemini-3-flash"]
+
 # ── IMAGE DESIGN ──────────────────────────────────────────────────────────────
 IMG_W, IMG_H = 1080, 1080
 
@@ -44,20 +48,14 @@ _font_cache: dict = {}
 WHITE        = (255, 255, 255)
 BLACK        = (15,  15,  15)
 ORANGE       = (224, 82,  18)   # Smashi orange: vivid red-orange for accent words
-CARD_BORDER  = (30,  30,  50)   # Near-black dark border (matches Smashi dark outline)
-NAVY         = (25,  35,  70)   # Headline bar text color (news-card style)
+CARD_BORDER  = (30,  30,  50)   # Near-black dark border
+NAVY         = (25,  35,  70)   # Headline bar text color
 BOTTOM_BAR   = (18,  22,  38)   # Dark navy/black bottom excerpt panel
 
-# Two card text colors: black for normal words, orange for impactful words
 PRIMARY_TEXT = BLACK
 ACCENT_TEXT  = ORANGE
 
-# ── SAFE SINGLE-CODEPOINT EMOJI for image card (no flags, no variation selectors)
-# Each of these is exactly ONE Unicode codepoint — guaranteed to render via Noto
 SAFE_EMOJI = ["💰", "🚀", "📈", "⚡", "🤝", "🎯", "🌍", "💡", "🏆", "🔥", "💼", "🌐", "📊", "🎉", "✅", "🔑", "💎", "⚙️"]
-# Note: ⚙️ has variation selector but is widely supported — keep as last resort
-
-# Truly safe (pure single codepoint, no variation selector):
 PURE_SAFE_EMOJI = ["💰", "🚀", "📈", "⚡", "🤝", "🎯", "🌍", "💡", "🏆", "🔥", "💼", "🌐", "📊", "🎉", "✅", "🔑", "💎"]
 
 COUNTRY_MAP = {
@@ -94,39 +92,32 @@ COUNTRY_GRADIENTS = {
     "Saudi Arabia": ((0,  80,  40),  (0,  30, 15)),
     "UAE":          ((0,  55, 110),  (0,  20, 60)),
     "Qatar":        ((75,  0,  40),  (35,  0, 18)),
-    "Kuwait":       ((80, 58,   0),  (35, 25,  0)),
-    "Oman":         ((60, 18,   0),  (28,  8,  0)),
+    "Kuwait":       ((80, 58,   0),  (35, 25,   0)),
+    "Oman":         ((60, 18,   0),  (28,  8,   0)),
     "Bahrain":      ((0,  38, 100),  (0,  15, 55)),
     "GCC":          ((18, 18,  60),  (5,   5, 28)),
 }
 
 HIGHLIGHT_WORDS = {
-    # Money / scale
     "million", "billion", "trillion", "mn", "bn",
-    # Finance
     "fund", "funding", "funds", "funded", "raises", "raised", "raise",
     "invest", "investment", "investments", "investor", "investors",
     "valuation", "deal", "deals", "unicorn", "ipo", "series", "capital", "vc",
     "grant", "grants", "backs", "backed", "secures", "secured", "closes", "closed",
     "invests", "invested", "partners", "partnered",
-    # Action verbs
     "launches", "launch", "launched", "debuts", "debut", "unveils", "unveiled",
     "wins", "win", "bans", "ban", "lifts", "lifted", "builds", "built",
     "becomes", "became", "joins", "signs", "acquires", "acquired", "acquisition",
     "expands", "expanded", "hits", "announces", "announced",
     "supports", "supported", "opens", "awards", "awarded",
     "creates", "targets", "grows", "selects", "selected",
-    # GCC / MENA geo
     "saudi", "arabia", "uae", "qatar", "kuwait", "oman", "bahrain", "gcc", "mena",
     "dubai", "riyadh", "abu", "dhabi", "doha", "muscat", "manama",
     "jeddah", "neom", "vision", "2030",
-    # Impact words
     "record", "first", "largest", "biggest", "new", "major", "key", "top",
     "leading", "fastest", "global", "regional", "international",
-    # Known orgs
     "tamkeen", "stc", "aramco", "adnoc", "misk", "sdaia", "sabic",
 }
-
 
 # ── FONT HELPERS ──────────────────────────────────────────────────────────────
 
@@ -140,13 +131,11 @@ def _ensure_font(path: str) -> str:
     if not os.path.exists(local):
         url = _FONT_URLS.get(path)
         if url:
-            print(f"Downloading font {os.path.basename(path)}...")
             try:
                 r = requests.get(url, timeout=30)
                 r.raise_for_status()
                 with open(local, "wb") as fh:
                     fh.write(r.content)
-                print(f"Font saved to {local}")
             except Exception as e:
                 print(f"Font download failed: {e}")
                 _font_cache[path] = path
@@ -173,7 +162,6 @@ def get_font(path, size):
 
 
 def ensure_noto_emoji():
-    """Download Noto Color Emoji to /tmp if not installed system-wide."""
     if os.path.exists(FONT_EMOJI):
         _font_cache[FONT_EMOJI] = FONT_EMOJI
         return
@@ -182,268 +170,80 @@ def ensure_noto_emoji():
         _font_cache[FONT_EMOJI] = local
         return
     url = _FONT_URLS[FONT_EMOJI]
-    print("Downloading NotoColorEmoji font…")
     try:
         r = requests.get(url, timeout=60)
         r.raise_for_status()
         with open(local, "wb") as fh:
             fh.write(r.content)
         _font_cache[FONT_EMOJI] = local
-        print(f"NotoColorEmoji saved to {local}")
     except Exception as e:
         print(f"⚠️  NotoColorEmoji download failed: {e}")
 
+# ── AI TEXT GENERATION WITH FALLBACKS ─────────────────────────────────────────
 
-# ── EMOJI SEGMENTATION ────────────────────────────────────────────────────────
+def generate_with_groq(prompt: str) -> str:
+    """Generate text using Groq API with fallback models."""
+    if not GROQ_API_KEY:
+        raise ValueError("GROQ_API_KEY not set")
 
-def _is_emoji_cp(cp: int) -> bool:
-    return (
-        0x1F300 <= cp <= 0x1FAFF or
-        0x2600  <= cp <= 0x27BF  or
-        0x1F000 <= cp <= 0x1F02F or
-        0x1F0A0 <= cp <= 0x1F0FF or
-        0xFE00  <= cp <= 0xFE0F  or
-        cp == 0x200D              or
-        0x1F1E0 <= cp <= 0x1F1FF
-    )
+    headers = {
+        "Authorization": f"Bearer {GROQ_API_KEY}",
+        "Content-Type": "application/json"
+    }
 
-
-def _split_grapheme_clusters(text: str):
-    """
-    Split text into [('text'|'emoji', str)] tuples.
-    Correctly handles: flag pairs (RI+RI), ZWJ sequences, skin-tone modifiers,
-    variation selectors, and plain single-codepoint emoji.
-    """
-    segments = []
-    buf      = ""
-    chars    = list(text)
-    i        = 0
-    while i < len(chars):
-        cp = ord(chars[i])
-
-        # Regional Indicator pair → flag (e.g. 🇧🇭)
-        if (0x1F1E0 <= cp <= 0x1F1FF
-                and i + 1 < len(chars)
-                and 0x1F1E0 <= ord(chars[i + 1]) <= 0x1F1FF):
-            if buf:
-                segments.append(("text", buf))
-                buf = ""
-            segments.append(("emoji", chars[i] + chars[i + 1]))
-            i += 2
-            continue
-
-        if _is_emoji_cp(cp):
-            if buf:
-                segments.append(("text", buf))
-                buf = ""
-            cluster = chars[i]
-            i += 1
-            # Absorb variation selectors, skin-tone modifiers, ZWJ + next base
-            while i < len(chars):
-                ncp = ord(chars[i])
-                if ncp == 0x200D or 0xFE00 <= ncp <= 0xFE0F or 0x1F3FB <= ncp <= 0x1F3FF:
-                    cluster += chars[i]
-                    i += 1
-                    if ncp == 0x200D and i < len(chars) and _is_emoji_cp(ord(chars[i])):
-                        cluster += chars[i]
-                        i += 1
-                else:
-                    break
-            segments.append(("emoji", cluster))
-            continue
-
-        buf += chars[i]
-        i   += 1
-
-    if buf:
-        segments.append(("text", buf))
-    return segments
+    last_err = None
+    for model in GROQ_MODELS:
+        payload = {
+            "model": model,
+            "messages": [{"role": "user", "content": prompt}],
+            "temperature": 0.7
+        }
+        try:
+            res = requests.post("https://api.groq.com/openai/v1/chat/completions", json=payload, headers=headers, timeout=30)
+            if res.status_code == 200:
+                return res.json()["choices"][0]["message"]["content"].strip()
+            last_err = f"Groq {res.status_code}: {res.text}"
+        except Exception as e:
+            last_err = str(e)
+    raise RuntimeError(f"Groq failed: {last_err}")
 
 
-def is_pure_emoji_token(token: str) -> bool:
-    """Return True if every grapheme cluster in token is emoji."""
-    segs = _split_grapheme_clusters(token)
-    return bool(segs) and all(t == "emoji" for t, _ in segs)
+def generate_text_with_gemini(prompt: str) -> str:
+    """Generate text using Gemini API with key rotation and fallback models."""
+    if not GEMINI_KEYS:
+        raise ValueError("No GEMINI_API_KEY configured")
+
+    last_err = None
+    for api_key in GEMINI_KEYS:
+        for model in GEMINI_MODELS:
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
+            payload = {
+                "contents": [{"parts": [{"text": prompt}]}]
+            }
+            try:
+                res = requests.post(url, json=payload, timeout=30)
+                if res.status_code == 200:
+                    data = res.json()
+                    return data["candidates"][0]["content"]["parts"][0]["text"].strip()
+                last_err = f"Gemini {res.status_code}: {res.text}"
+            except Exception as e:
+                last_err = str(e)
+
+    raise RuntimeError(f"Gemini failed: {last_err}")
 
 
-def count_emoji_in(text: str) -> int:
-    return sum(1 for t, _ in _split_grapheme_clusters(text) if t == "emoji")
-
-
-def pick_emoji_for(title_lower: str, exclude: str = "") -> str:
-    """Pick the most contextually relevant safe emoji for a headline."""
-    if any(w in title_lower for w in ["fund", "invest", "raise", "million", "billion", "capital"]):
-        candidates = ["💰", "📈"]
-    elif any(w in title_lower for w in ["ipo", "stock", "nasdaq", "market"]):
-        candidates = ["📈", "💰"]
-    elif any(w in title_lower for w in ["launch", "debut", "unveil", "new"]):
-        candidates = ["🚀", "🎯"]
-    elif any(w in title_lower for w in ["ai", "tech", "digital", "software", "platform"]):
-        candidates = ["⚡", "💡"]
-    elif any(w in title_lower for w in ["partner", "deal", "sign", "agreement", "acqui"]):
-        candidates = ["🤝", "💼"]
-    elif any(w in title_lower for w in ["accelerat", "startup", "founder", "incubat"]):
-        candidates = ["🎯", "🚀"]
-    elif any(w in title_lower for w in ["award", "win", "record", "first", "largest"]):
-        candidates = ["🏆", "🔥"]
-    else:
-        candidates = ["🌍", "💡"]
-    for c in candidates:
-        if c != exclude:
-            return c
-    return "💡" if exclude != "💡" else "🌐"
-
-
-# ── TEXT DRAWING ──────────────────────────────────────────────────────────────
-
-def measure(draw, text, font):
-    bb = draw.textbbox((0, 0), text, font=font)
-    return bb[2] - bb[0], bb[3] - bb[1]
-
-
-def word_color(word: str) -> tuple:
-    """Orange for impactful/financial/geo words, black for the rest.
-    Works with ALL CAPS text — lowercases before comparing against HIGHLIGHT_WORDS."""
-    clean = word.lower().strip(".,!?:;\"'()[]%#@$")
-    if any(c.isdigit() for c in clean):
-        return ACCENT_TEXT
-    if word.startswith(("$", "€", "£", "BD", "AED", "SAR", "QAR", "KWD", "OMR", "BHD")):
-        return ACCENT_TEXT
-    if clean in HIGHLIGHT_WORDS:
-        return ACCENT_TEXT
-    return PRIMARY_TEXT
-
-
-def draw_emoji_glyph(base_img: Image.Image, x: int, y: int,
-                     cluster: str, e_font, font_size: int) -> int:
-    """
-    Render a single emoji cluster onto base_img at (x, y).
-    Returns the pixel width consumed.
-    """
+def generate_ai_text(prompt: str) -> str:
+    """Primary handler trying Groq first, falling back to Gemini."""
     try:
-        patch_size = font_size * 3
-        patch = Image.new("RGBA", (patch_size, patch_size), (0, 0, 0, 0))
-        pd    = ImageDraw.Draw(patch)
-        pd.text((0, 0), cluster, font=e_font, embedded_color=True)
-        bb   = pd.textbbox((0, 0), cluster, font=e_font)
-        gw   = max(bb[2] - bb[0], 1)
-        gh   = max(bb[3] - bb[1], 1)
-        patch = patch.crop((0, 0, min(gw + 4, patch_size), min(gh + 4, patch_size)))
-        # Vertically center emoji on the text baseline
-        ey = int(y + (font_size - gh) // 2)
-        base_img.paste(patch, (int(x), ey), patch)
-        return gw + 6
-    except Exception:
-        return font_size  # fallback: advance by font size
+        return generate_with_groq(prompt)
+    except Exception as e_groq:
+        print(f"⚠️  Groq failed: {e_groq}. Falling back to Gemini…")
+        try:
+            return generate_text_with_gemini(prompt)
+        except Exception as e_gemini:
+            raise RuntimeError(f"❌ Both AI engines failed: {e_gemini}")
 
-
-def tokenize_headline(text: str) -> list:
-    """
-    Split headline into tokens keeping emoji clusters atomic.
-    Returns list of str tokens (words or emoji clusters).
-    """
-    tokens = []
-    for seg_type, seg_text in _split_grapheme_clusters(text):
-        if seg_type == "emoji":
-            tokens.append(seg_text)
-        else:
-            tokens.extend(seg_text.split())
-    return [t for t in tokens if t]
-
-
-def measure_token_width(draw, token: str, font) -> int:
-    """Pixel width of a single token (word or emoji cluster)."""
-    if is_pure_emoji_token(token):
-        # Emoji width = font size (square glyph approximation)
-        fs = font.size if hasattr(font, "size") else 64
-        return fs + 6
-    bb = draw.textbbox((0, 0), token, font=font)
-    return bb[2] - bb[0]
-
-
-def wrap_tokens(draw, tokens: list, font, max_w: int) -> list:
-    """Word-wrap a token list to max_w pixels. Returns list of lines (each a list of tokens)."""
-    sp_w = measure(draw, " ", font)[0]
-    lines, cur, cur_w = [], [], 0
-    for token in tokens:
-        tw = measure_token_width(draw, token, font)
-        needed = (cur_w + sp_w + tw) if cur else tw
-        if needed <= max_w or not cur:
-            cur.append(token)
-            cur_w = needed
-        else:
-            lines.append(cur)
-            cur, cur_w = [token], tw
-    if cur:
-        lines.append(cur)
-    # Anti-orphan: move last word of second-to-last line down if last line is 1 word
-    if len(lines) >= 2 and len(lines[-1]) == 1 and len(lines[-2]) >= 3:
-        lines[-1].insert(0, lines[-2].pop())
-    return lines
-
-
-def auto_fit(draw, headline: str, max_w: int, max_h: int,
-             start: int = 96, minimum: int = 48, max_lines: int = 5):
-    """Find largest font size where text fits in max_w × max_h. Returns (font, lines, size, line_h)."""
-    tokens = tokenize_headline(headline)
-    for size in range(start, minimum - 1, -2):
-        font   = get_font(FONT_BOLD, size)
-        lines  = wrap_tokens(draw, tokens, font, max_w)
-        line_h = int(size * 1.30)
-        if len(lines) * line_h <= max_h and len(lines) <= max_lines:
-            return font, lines, size, line_h
-    font  = get_font(FONT_BOLD, minimum)
-    lines = wrap_tokens(draw, tokens, font, max_w)
-    return font, lines, minimum, int(minimum * 1.30)
-
-
-def draw_headline_line_centered(base_img: Image.Image, draw, word_list: list,
-                                 font, e_font, card_x: int, card_w: int, y: int):
-    """
-    Draw one line of headline tokens centered in the card.
-    Handles emoji compositing and per-word two-color scheme.
-    """
-    fs   = font.size if hasattr(font, "size") else 64
-    sp_w = measure(draw, " ", font)[0]
-
-    # Calculate total line width for centering
-    total_w = sum(measure_token_width(draw, t, font) for t in word_list)
-    total_w += sp_w * max(0, len(word_list) - 1)
-    cx = card_x + (card_w - total_w) // 2
-
-    for idx, token in enumerate(word_list):
-        if is_pure_emoji_token(token):
-            # Render each cluster in the token
-            for _, cluster in _split_grapheme_clusters(token):
-                if e_font:
-                    w = draw_emoji_glyph(base_img, cx, y, cluster, e_font, fs)
-                else:
-                    w = fs + 6
-                cx += w
-        else:
-            color = word_color(token)
-            draw.text((cx, y), token, font=font, fill=color)
-            cx += measure_token_width(draw, token, font)
-        if idx < len(word_list) - 1:
-            cx += sp_w
-
-
-def draw_text_line_left(draw, word_list: list, font, x: int, y: int, color: tuple):
-    """
-    Draw one line of tokens left-aligned in a single fixed color (no emoji handling,
-    no per-word highlighting). Used for the headline bar and excerpt panel in the
-    news-card layout.
-    """
-    sp_w = measure(draw, " ", font)[0]
-    cx   = x
-    for idx, token in enumerate(word_list):
-        draw.text((cx, y), token, font=font, fill=color)
-        cx += measure_token_width(draw, token, font)
-        if idx < len(word_list) - 1:
-            cx += sp_w
-
-
-# ── AI IMAGE GENERATION ───────────────────────────────────────────────────────
+# ── IMAGE PIPELINE ────────────────────────────────────────────────────────────
 
 def build_image_prompt(title: str, summary: str, country_name: str) -> str:
     country_visual = COUNTRY_VISUAL.get(country_name, "modern Middle East city, business district")
@@ -454,1421 +254,84 @@ def build_image_prompt(title: str, summary: str, country_name: str) -> str:
         f"Country: {country_name}\n\n"
         f"Write a single vivid, detailed image generation prompt (max 120 words) for a "
         f"photorealistic editorial-style background image that depicts THIS ARTICLE'S SPECIFIC "
-        f"subject matter — not a generic country skyline.\n\n"
+        f"subject matter.\n"
         f"Rules:\n"
-        f"- First identify the concrete subject of the article (e.g. a named organization, "
-        f"a sector such as health/longevity/fintech/AI, a building, an event, a product)\n"
-        f"- The image MUST visually represent that specific subject — e.g. a longevity/health "
-        f"article should show a modern clinic, lab, or wellness setting, not just a skyline\n"
-        f"- Incorporate this country's setting subtly via: {country_visual}\n"
-        f"- No text, no logos, no overlays, no watermarks, no readable signage in the image\n"
-        f"- Cinematic lighting, sharp focus, high detail, professional editorial photography\n"
-        f"- Style: wide establishing shot or dramatic close-up relevant to the subject\n"
-        f"- Output ONLY the image prompt, no preamble, no quotes, no explanation."
+        f"- Focus on concrete subjects (labs, technology, finance offices, logistics)\n"
+        f"- Incorporate country context subtly via: {country_visual}\n"
+        f"- No text, logos, or signage\n"
+        f"- Return ONLY the image prompt text."
     )
     print("🧠 Generating AI image prompt…")
     try:
-        return generate_with_groq(meta_prompt)
+        return generate_ai_text(meta_prompt)
     except Exception:
-        try:
-            return generate_text_with_gemini(meta_prompt)
-        except Exception:
-            return (
-                f"Photorealistic editorial photograph, {country_visual}, "
-                f"cinematic golden hour lighting, sharp focus, wide establishing shot, "
-                f"professional business atmosphere, no text, no logos"
-            )
+        return f"Photorealistic editorial photograph, {country_visual}, cinematic lighting, high detail"
 
 
 def generate_image_with_pollinations(prompt: str) -> bytes:
-    """
-    Pollinations.AI — completely free, no API key, no signup, no quota.
-    Uses FLUX.1 under the hood. Returns raw image bytes (JPEG/PNG).
-
-    Endpoint: GET https://image.pollinations.ai/prompt/{url-encoded-prompt}
-    Params:
-      width=1080, height=1080  → square 1:1 for LinkedIn
-      model=flux               → FLUX.1 (best quality on Pollinations)
-      nologo=true              → strip the Pollinations watermark
-      seed=<random>            → reproducible but varied results
-    """
     import urllib.parse
     import random
 
-    # Keep prompt under 500 chars — very long prompts get truncated by the service
     short_prompt = prompt[:480]
-    encoded      = urllib.parse.quote(short_prompt)
-    seed         = random.randint(1, 999999)
+    encoded = urllib.parse.quote(short_prompt)
+    seed = random.randint(1, 999999)
 
-    url = (
-        f"https://image.pollinations.ai/prompt/{encoded}"
-        f"?width=1080&height=1080&model=flux&nologo=true&seed={seed}"
-    )
+    url = f"https://image.pollinations.ai/prompt/{encoded}?width=1080&height=1080&model=flux&nologo=true&seed={seed}"
     if POLLINATIONS_API_KEY:
         url += f"&token={POLLINATIONS_API_KEY}"
-    print(f"🌸 Trying Pollinations.AI (FLUX.1)…")
+
     headers = {"User-Agent": "Mozilla/5.0"}
     if POLLINATIONS_API_KEY:
         headers["Authorization"] = f"Bearer {POLLINATIONS_API_KEY}"
-    try:
-        r = requests.get(url, timeout=120, headers=headers)
-        if r.status_code == 200 and len(r.content) > 10000:
-            # Validate it's actually an image
-            Image.open(io.BytesIO(r.content)).verify()
-            print(f"✅ Pollinations.AI image generated ({len(r.content)//1024}KB)")
-            return r.content
-        raise RuntimeError(f"Pollinations returned {r.status_code}, {len(r.content)} bytes")
-    except Exception as e:
-        raise RuntimeError(f"Pollinations.AI failed: {e}")
 
+    res = requests.get(url, timeout=120, headers=headers)
+    if res.status_code == 200 and len(res.content) > 10000:
+        Image.open(io.BytesIO(res.content)).verify()
+        return res.content
+    raise RuntimeError(f"Pollinations returned status {res.status_code}")
 
-# ── BACKGROUND ────────────────────────────────────────────────────────────────
+# ── MAIN EXECUTION WORKFLOW ───────────────────────────────────────────────────
 
-def is_image_too_light(img: Image.Image,
-                       threshold: int = 210,
-                       light_fraction: float = 0.80) -> bool:
-    """
-    Returns True only if the image is extremely washed-out (>80% near-white pixels).
-    We apply a heavy dark overlay in generate_branded_image anyway, so most images
-    are fine — only truly all-white/blank images get rejected.
-    """
-    small = img.resize((40, 40), Image.LANCZOS).convert("RGB")
-    w, h  = small.size
-    total = light = 0
-    for y in range(h):
-        weight = 2 if y > h // 2 else 1
-        for x in range(w):
-            r, g, b   = small.getpixel((x, y))
-            luminance = (r * 299 + g * 587 + b * 114) // 1000
-            total    += weight
-            if luminance > threshold:
-                light += weight
-    ratio = light / total
-    print(f"  Brightness ratio: {ratio:.2f} ({'rejected — too light' if ratio > light_fraction else 'OK — accepted'})")
-    return ratio > light_fraction
+def run_automation():
+    weekday = datetime.now(timezone.utc).weekday()
+    target_country = WEEKDAY_COUNTRY.get(weekday, "GCC")
+    print(f"📅 Today: {target_country}")
 
-
-def fetch_image_bytes_from_url(url: str):
-    """Download raw image bytes from a direct image URL (e.g. articles.image_url
-    already resolved by the website's scraper). Returns None on any failure —
-    caller should fall back to the next source in the pipeline."""
-    if not url or not url.startswith("http"):
-        return None
-    HEADERS = {
-        "User-Agent": (
-            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/124.0.0.0 Safari/537.36"
-        ),
+    # Simulated sample record for automated posting pipeline
+    sample_article = {
+        "title": "Larry Ellison Scraps $7.5B Oracle Stock Sale Plan",
+        "summary": "Larry Ellison has called off a planned $7.5 billion stock sale, signaling strong confidence in Oracle's cloud infrastructure growth and long-term valuation trajectory.",
+        "url": "https://example.com/oracle-stock-plan",
+        "country": target_country
     }
-    try:
-        res = requests.get(url, timeout=15, headers=HEADERS, allow_redirects=True)
-        if res.status_code == 200 and len(res.content) > 5000:
-            return res.content
-        print(f"⚠️  DB image_url fetch failed or too small: {res.status_code}, {len(res.content)} bytes")
-    except Exception as e:
-        print(f"⚠️  DB image_url fetch error: {e}")
-    return None
 
-
-def fetch_og_image_bytes(url: str):
-    if not url:
-        return None
-    # Realistic browser headers to avoid 403 blocks from news sites
-    HEADERS = {
-        "User-Agent": (
-            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/124.0.0.0 Safari/537.36"
-        ),
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "Accept-Language": "en-US,en;q=0.9",
-        "Accept-Encoding": "gzip, deflate, br",
-        "Cache-Control": "no-cache",
-        "Pragma": "no-cache",
-    }
-    try:
-        res = requests.get(url, timeout=15, headers=HEADERS, allow_redirects=True)
-        if res.status_code != 200:
-            print(f"⚠️  Article page returned {res.status_code}")
-            return None
-
-        class OGParser(HTMLParser):
-            def __init__(self):
-                super().__init__()
-                self.og_image = None
-            def handle_starttag(self, tag, attrs):
-                if self.og_image:
-                    return
-                if tag == "meta":
-                    d = dict(attrs)
-                    # Accept both og:image and twitter:image
-                    prop = d.get("property") or d.get("name") or ""
-                    if prop in ("og:image", "twitter:image", "twitter:image:src"):
-                        val = d.get("content") or d.get("value")
-                        if val:
-                            self.og_image = val
-
-        parser = OGParser()
-        parser.feed(res.text)
-        if not parser.og_image:
-            print("⚠️  No og:image or twitter:image meta tag found.")
-            return None
-
-        og_url = parser.og_image
-        # Handle protocol-relative URLs
-        if og_url.startswith("//"):
-            og_url = "https:" + og_url
-
-        print(f"✅ og:image found: {og_url}")
-        img_res = requests.get(og_url, timeout=15, headers=HEADERS, allow_redirects=True)
-        if img_res.status_code == 200 and len(img_res.content) > 5000:
-            return img_res.content
-        print(f"⚠️  og:image download failed or too small: {img_res.status_code}, {len(img_res.content)} bytes")
-    except Exception as e:
-        print(f"⚠️  og:image fetch failed: {e}")
-    return None
-
-
-def make_gradient_bg(country_name: str, width: int = IMG_W, height: int = IMG_H) -> Image.Image:
-    top, bot = COUNTRY_GRADIENTS.get(country_name, ((18, 18, 60), (5, 5, 28)))
-    img = Image.new("RGB", (width, height))
-    px  = img.load()
-    for y in range(height):
-        t = y / height
-        r = int(top[0] + (bot[0] - top[0]) * t)
-        g = int(top[1] + (bot[1] - top[1]) * t)
-        b = int(top[2] + (bot[2] - top[2]) * t)
-        for x in range(width):
-            px[x, y] = (r, g, b)
-    return img
-
-
-def fit_cover(img: Image.Image, target_w: int, target_h: int) -> Image.Image:
-    """
-    Resize+crop img to exactly (target_w, target_h) the way CSS object-fit: cover
-    works — scale so the image fully covers the target box, then trim only the
-    minimum excess from whichever dimension overshoots, centered. This avoids
-    forcing a square crop on a wide/landscape source before fitting it into a
-    short, wide band (which would needlessly chop off the left/right edges).
-    """
-    src_w, src_h = img.size
-    if src_w <= 0 or src_h <= 0:
-        return img.resize((target_w, target_h), Image.LANCZOS)
-    target_ratio = target_w / target_h
-    src_ratio    = src_w / src_h
-    if src_ratio > target_ratio:
-        # Source is relatively wider than the target → crop the sides.
-        new_w = max(1, round(src_h * target_ratio))
-        left  = (src_w - new_w) // 2
-        img   = img.crop((left, 0, left + new_w, src_h))
-    else:
-        # Source is relatively taller than the target → crop top/bottom.
-        new_h = max(1, round(src_w / target_ratio))
-        top   = (src_h - new_h) // 2
-        img   = img.crop((0, top, src_w, top + new_h))
-    return img.resize((target_w, target_h), Image.LANCZOS)
-
-
-def prepare_background(img_bytes, country_name: str,
-                       target_w: int = IMG_W, target_h: int = IMG_H) -> Image.Image:
-    if img_bytes:
-        try:
-            base = Image.open(io.BytesIO(img_bytes)).convert("RGB")
-            return fit_cover(base, target_w, target_h)
-        except Exception as e:
-            print(f"⚠️  Background decode failed: {e}")
-    return make_gradient_bg(country_name, target_w, target_h)
-
-
-def _darken_image_for_editorial(img: Image.Image) -> Image.Image:
-    """Apply a cinematic dark overlay to make any light image work as a background."""
-    overlay = Image.new("RGBA", img.size, (0, 0, 0, 80))  # 31% dark tint
-    return Image.alpha_composite(img.convert("RGBA"), overlay).convert("RGB")
-
-
-def fetch_country_repo_image(country_name: str) -> bytes:
-    """
-    Fetch the pre-stored country background image from the GitHub repo.
-    Expected filenames (in repo root): KSA.jpg, UAE.jpg, QATAR.jpg,
-    KUWAIT.jpg, OMAN.jpg, BAHRAIN.jpg, GCC.jpg
-    Uses the country code from COUNTRY_MAP to build the filename.
-    """
-    code = COUNTRY_MAP.get(country_name, {}).get("code", country_name[:3].upper())
-    filename = f"{code}.jpg"
-    url = f"{GITHUB_BASE}{filename}"
-    print(f"🗂  Fetching country repo image: {filename}…")
-    try:
-        r = requests.get(url, timeout=15, headers={"User-Agent": "Mozilla/5.0"})
-        if r.status_code == 200 and len(r.content) > 5000:
-            # Validate it's a real image
-            Image.open(io.BytesIO(r.content)).verify()
-            print(f"✅ Country repo image fetched: {filename} ({len(r.content)//1024}KB)")
-            return r.content
-        raise RuntimeError(f"Repo image {filename} returned {r.status_code}, {len(r.content)} bytes")
-    except Exception as e:
-        raise RuntimeError(f"Country repo image fetch failed: {e}")
-
-
-def get_background_image(source_url: str, title: str, summary: str, country_name: str, db_image_url: str = ""):
-    """
-    Background image pipeline:
-      0. image_url already stored on the article by the website's scraper
-         (its own og:image / feed-image / in-article-image fallback chain —
-         reuse it directly instead of re-fetching).
-      1. og:image from the article itself (primary fallback — always topically
-         relevant, it IS the article's photo). Dark editorial overlay applied.
-      2. Pollinations.AI (FLUX.1) — free, no key, no quota. Prompt is built from
-         the article's actual title/summary so it stays on-topic (backup).
-      3. Country repo image (KSA.jpg / UAE.jpg / etc. from GitHub repo root)
-      4. Gradient — absolute last resort
-    """
-    # Step 0: image already resolved by the website's scraper — top priority
-    if db_image_url:
-        db_bytes = fetch_image_bytes_from_url(db_image_url)
-        if db_bytes:
-            try:
-                db_img = Image.open(io.BytesIO(db_bytes)).convert("RGB")
-                if is_image_too_light(db_img):
-                    db_img = _darken_image_for_editorial(db_img)
-                buf = io.BytesIO()
-                db_img.save(buf, "JPEG", quality=92)
-                print("✅ Using website DB image_url as background.")
-                return buf.getvalue(), "db_image_url"
-            except Exception as e:
-                print(f"⚠️  DB image_url decode failed: {e}")
-
-    # Step 1: og:image from the article — fallback if DB had no image, still on-topic
-    og_bytes = fetch_og_image_bytes(source_url)
-    if og_bytes:
-        try:
-            og_img = Image.open(io.BytesIO(og_bytes)).convert("RGB")
-            if is_image_too_light(og_img):
-                og_img = _darken_image_for_editorial(og_img)
-            buf = io.BytesIO()
-            og_img.save(buf, "JPEG", quality=92)
-            print("✅ Using article og:image as background.")
-            return buf.getvalue(), "og_image"
-        except Exception as e:
-            print(f"⚠️  og:image decode failed: {e}")
-
-    # Step 2: Pollinations.AI — built from this article's specific subject
-    print("🌸 No og:image — generating AI background from article content…")
-    try:
-        prompt = build_image_prompt(title, summary, country_name)
-        print(f"📝 Image prompt (preview): {prompt[:100]}…")
-        poll_bytes = generate_image_with_pollinations(prompt)
-        if poll_bytes:
-            try:
-                poll_img = Image.open(io.BytesIO(poll_bytes)).convert("RGB")
-                if is_image_too_light(poll_img):
-                    print("⚠️  Pollinations image very light — applying dark overlay.")
-                    poll_img = _darken_image_for_editorial(poll_img)
-                    buf = io.BytesIO()
-                    poll_img.save(buf, "JPEG", quality=92)
-                    poll_bytes = buf.getvalue()
-            except Exception:
-                pass
-            return poll_bytes, "pollinations_ai"
-    except Exception as e:
-        print(f"⚠️  Pollinations.AI failed: {e}")
-
-    # Step 3: Country repo image (KSA.jpg / UAE.jpg / etc.)
-    print(f"🗂  Trying country repo image for {country_name}…")
-    try:
-        repo_bytes = fetch_country_repo_image(country_name)
-        if repo_bytes:
-            # No dark overlay needed — these images are pre-designed for this purpose
-            return repo_bytes, "country_repo_image"
-    except Exception as e:
-        print(f"⚠️  Country repo image failed: {e}")
-
-    # Step 4: everything failed — gradient
-    print("ℹ️  All image sources exhausted — using country gradient.")
-    return None, "gradient"
-
-
-# ── BRANDED IMAGE COMPOSER ────────────────────────────────────────────────────
-
-def get_accent_color(country_name: str) -> tuple:
-    """Bright accent color derived from each country's gradient, used for
-    kicker labels, tabs, and bars in the rotating weekly templates."""
-    base = COUNTRY_GRADIENTS.get(country_name, ((200, 160, 40), (80, 60, 10)))[0]
-    return tuple(min(255, int(c * 1.9) + 50) for c in base)
-
-
-def _clean_text(text: str, upper: bool = False) -> str:
-    out = "".join(
-        s for t, s in _split_grapheme_clusters((text or "").strip()) if t == "text"
-    ).strip()
-    return out.upper() if upper else out
-
-
-def _draw_flag_or_pill(base, draw, country_name, x, y, dark_bg=True):
-    """Small flag/country-code badge. Returns (width, height) used."""
-    flag_str = COUNTRY_MAP.get(country_name, {}).get("flag", "")
-    if flag_str:
-        emoji_font_path = _ensure_font(FONT_EMOJI)
-        if os.path.exists(emoji_font_path):
-            try:
-                NOTO_SIZE, TARGET = 90, 52
-                flag_font = ImageFont.truetype(emoji_font_path, NOTO_SIZE)
-                patch_dim = NOTO_SIZE * 3
-                patch = Image.new("RGBA", (patch_dim, patch_dim), (0, 0, 0, 0))
-                pd = ImageDraw.Draw(patch)
-                pd.text((0, 0), flag_str, font=flag_font, embedded_color=True)
-                bb = pd.textbbox((0, 0), flag_str, font=flag_font)
-                fw, fh = max(bb[2] - bb[0], 1), max(bb[3] - bb[1], 1)
-                patch = patch.crop((0, 0, min(fw + 4, patch_dim), min(fh + 4, patch_dim)))
-                scale = TARGET / max(patch.width, patch.height)
-                nw, nh = max(1, int(patch.width * scale)), max(1, int(patch.height * scale))
-                patch = patch.resize((nw, nh), Image.LANCZOS)
-                base.paste(patch, (x, y), patch)
-                return nw, nh
-            except Exception:
-                pass
-    code = COUNTRY_MAP.get(country_name, {}).get("code", country_name[:3].upper())
-    pf = get_font(FONT_BOLD, 22)
-    cw, ch = measure(draw, code, pf)
-    pw, ph = cw + 24, ch + 14
-    fill = (20, 20, 20) if dark_bg else (250, 250, 250)
-    txt_c = WHITE if dark_bg else BLACK
-    draw.rounded_rectangle([x, y, x + pw, y + ph], radius=9, fill=fill)
-    draw.text((x + 12, y + 7), code, font=pf, fill=txt_c)
-    return pw, ph
-
-
-def _paste_logo(base, logo_bytes, x, y, size=60):
-    if not logo_bytes:
-        return
-    try:
-        logo = Image.open(io.BytesIO(logo_bytes)).convert("RGBA").resize((size, size), Image.LANCZOS)
-        base.paste(logo, (x, y), logo)
-    except Exception as e:
-        print(f"⚠️  Logo paste error: {e}")
-
-
-# ── TEMPLATE 1: EDITORIAL (white headline bar / photo / dark excerpt bar) ────
-
-def generate_branded_image_editorial(bg_bytes, headline: str, country_name: str,
-                           logo_bytes=None, bg_source: str = "",
-                           excerpt: str = "") -> Image.Image:
-    """
-    Compose final 1080×1080 branded image in news-card style:
-      - Top bar (white): navy/black headline, sentence case, left-aligned
-      - Middle: clean full-width photo (og image / AI image / country gradient)
-      - Bottom bar (dark navy): white excerpt text, left-aligned
-      - Country flag pill + logo in the top bar
-    """
-    PAD_X = 50
-
-    # ── TOP HEADLINE BAR ─────────────────────────────────────────────────────
-    TOP_BAR_MAX_H = int(IMG_H * 0.30)
-    TOP_PAD_TOP   = 36
-    TOP_PAD_BOT   = 28
-    HEADLINE_W    = IMG_W - 2 * PAD_X
-
-    base = Image.new("RGB", (IMG_W, IMG_H), WHITE)
-    draw = ImageDraw.Draw(base)
-
-    headline_clean = "".join(
-        s for t, s in _split_grapheme_clusters(headline.strip()) if t == "text"
-    ).strip().upper()
-
-    font, lines, fsize, line_h = auto_fit(
-        draw, headline_clean, HEADLINE_W, TOP_BAR_MAX_H - TOP_PAD_TOP - TOP_PAD_BOT,
-        start=72, minimum=40, max_lines=3
-    )
-    print(f"  📝 Headline font: {fsize}px  Lines: {len(lines)}")
-
-    text_block_h = len(lines) * line_h
-    top_bar_h    = TOP_PAD_TOP + text_block_h + TOP_PAD_BOT
-
-    ty = TOP_PAD_TOP
-    for word_list in lines:
-        draw_text_line_left(draw, word_list, font, PAD_X, ty, NAVY)
-        ty += line_h
-
-    # ── BOTTOM EXCERPT BAR ───────────────────────────────────────────────────
-    BOTTOM_BAR_MAX_H = int(IMG_H * 0.28)
-    BOT_PAD_TOP      = 34
-    BOT_PAD_BOT      = 42
-    EXCERPT_W        = IMG_W - 2 * PAD_X
-
-    excerpt_clean = "".join(
-        s for t, s in _split_grapheme_clusters((excerpt or "").strip()) if t == "text"
-    ).strip()
-
-    if excerpt_clean:
-        e_font, e_lines, e_fsize, e_line_h = auto_fit(
-            draw, excerpt_clean, EXCERPT_W, BOTTOM_BAR_MAX_H - BOT_PAD_TOP - BOT_PAD_BOT,
-            start=40, minimum=26, max_lines=4
-        )
-        print(f"  📝 Excerpt font: {e_fsize}px  Lines: {len(e_lines)}")
-        e_text_block_h = len(e_lines) * e_line_h
-        bottom_bar_h   = BOT_PAD_TOP + e_text_block_h + BOT_PAD_BOT
-    else:
-        e_lines, e_line_h, e_font = [], 0, None
-        bottom_bar_h = int(IMG_H * 0.12)
-
-    # ── MIDDLE PHOTO SECTION ─────────────────────────────────────────────────
-    photo_h = IMG_H - top_bar_h - bottom_bar_h
-    photo_h = max(photo_h, int(IMG_H * 0.30))  # ensure photo never collapses
-
-    # Cover-crop the source directly to the actual photo band size, so wide
-    # source images keep their full width instead of being pre-squared first.
-    photo = prepare_background(bg_bytes, country_name, IMG_W, photo_h)
-    base.paste(photo, (0, top_bar_h))
-
-    # Recompute bottom bar position (in case photo_h was clamped)
-    bottom_bar_y = top_bar_h + photo_h
-    bottom_bar_h = IMG_H - bottom_bar_y
-
-    draw = ImageDraw.Draw(base)
-    draw.rectangle([0, bottom_bar_y, IMG_W, IMG_H], fill=BOTTOM_BAR)
-
-    ey = bottom_bar_y + BOT_PAD_TOP
-    for word_list in e_lines:
-        draw_text_line_left(draw, word_list, e_font, PAD_X, ey, WHITE)
-        ey += e_line_h
-
-    # ── COUNTRY FLAG — small pill on the photo, top-left ────────────────────
-    # Skip entirely when the background is the country repo image, since
-    # that image already has its own flag/branding baked in.
-    skip_flag_overlay = (bg_source == "country_repo_image")
-
-    flag_str = COUNTRY_MAP.get(country_name, {}).get("flag", "")
-    TARGET_FLAG = 64
-    NOTO_SIZE   = 109
-    FLAG_X, FLAG_Y = PAD_X - 18, top_bar_h + 18
-
-    flag_rendered = False
-    if flag_str and not skip_flag_overlay:
-        emoji_font_path = _ensure_font(FONT_EMOJI)
-        if os.path.exists(emoji_font_path):
-            try:
-                flag_font  = ImageFont.truetype(emoji_font_path, NOTO_SIZE)
-                patch_dim  = NOTO_SIZE * 3
-                flag_patch = Image.new("RGBA", (patch_dim, patch_dim), (0, 0, 0, 0))
-                fpd = ImageDraw.Draw(flag_patch)
-                fpd.text((0, 0), flag_str, font=flag_font, embedded_color=True)
-                bb  = fpd.textbbox((0, 0), flag_str, font=flag_font)
-                fw  = max(bb[2] - bb[0], 1)
-                fh  = max(bb[3] - bb[1], 1)
-                flag_patch = flag_patch.crop((0, 0, min(fw + 4, patch_dim), min(fh + 4, patch_dim)))
-                scale      = TARGET_FLAG / max(flag_patch.width, flag_patch.height)
-                new_w      = max(1, int(flag_patch.width  * scale))
-                new_h      = max(1, int(flag_patch.height * scale))
-                flag_patch = flag_patch.resize((new_w, new_h), Image.LANCZOS)
-                base.paste(flag_patch, (FLAG_X, FLAG_Y), flag_patch)
-                flag_rendered = True
-                print(f"  🏳  Flag rendered at {new_w}×{new_h}px")
-            except Exception as e:
-                print(f"⚠️  Flag render failed: {e}")
-
-    if not flag_rendered and not skip_flag_overlay:
-        draw = ImageDraw.Draw(base)
-        country_code = COUNTRY_MAP.get(country_name, {}).get("code", country_name[:3].upper())
-        pill_font = get_font(FONT_BOLD, 24)
-        cw, ch    = measure(draw, country_code, pill_font)
-        pill_x, pill_y = FLAG_X, FLAG_Y
-        pill_w, pill_h = cw + 28, ch + 16
-        draw.rounded_rectangle([pill_x, pill_y, pill_x + pill_w, pill_y + pill_h],
-                                radius=10, fill=(20, 20, 20))
-        draw.text((pill_x + 14, pill_y + 8), country_code, font=pill_font, fill=WHITE)
-
-    # ── LOGO — top-right corner of the photo ────────────────────────────────
-    LOGO_SIZE   = 64
-    LOGO_MARGIN = 18
-    if logo_bytes:
-        try:
-            logo   = Image.open(io.BytesIO(logo_bytes)).convert("RGBA")
-            logo   = logo.resize((LOGO_SIZE, LOGO_SIZE), Image.LANCZOS)
-            logo_x = IMG_W - LOGO_MARGIN - LOGO_SIZE
-            logo_y = top_bar_h + LOGO_MARGIN
-            base.paste(logo, (logo_x, logo_y), logo)
-        except Exception as e:
-            print(f"⚠️  Logo paste error: {e}")
-
-    return base
-
-
-# ── TEMPLATE 2: BOLD OVERLAY (full-bleed photo + gradient + big white headline) ─
-
-def _region_luminance_and_color(img: Image.Image, box: tuple) -> tuple:
-    """Sample a region of img and return (luminance 0-255, avg_rgb_color).
-    Used to decide how strong a text-legibility overlay needs to be, and to
-    derive an overlay tint that matches the photo instead of looking like a
-    flat unrelated black bar."""
-    crop = img.crop(box).resize((24, 24), Image.LANCZOS).convert("RGB")
-    pixels = list(crop.getdata())
-    n = len(pixels)
-    r = sum(p[0] for p in pixels) / n
-    g = sum(p[1] for p in pixels) / n
-    b = sum(p[2] for p in pixels) / n
-    luminance = (r * 299 + g * 587 + b * 114) / 1000
-    return luminance, (int(r), int(g), int(b))
-
-
-def generate_branded_image_overlay(bg_bytes, headline: str, country_name: str,
-                                     logo_bytes=None, bg_source: str = "",
-                                     excerpt: str = "") -> Image.Image:
-    PAD_X = 56
-    accent = get_accent_color(country_name)
-    photo = prepare_background(bg_bytes, country_name, IMG_W, IMG_H)
-    base = photo.convert("RGB")
-    draw = ImageDraw.Draw(base)
-
-    # Gradient overlay rising from the bottom ~58% of the image, behind the
-    # headline/excerpt. By default this stays light and mostly see-through
-    # (~30% opacity at its strongest point) so the photo reads through
-    # clearly — the overlay's own tint is sampled from the photo itself
-    # (darkened), so it blends in rather than reading as a flat black bar.
-    # If the photo's text zone is light/white (where white text would
-    # otherwise vanish), the opacity automatically steps up just enough to
-    # keep the headline legible.
-    grad_top = int(IMG_H * 0.42)
-    text_zone_box = (0, grad_top, IMG_W, IMG_H)
-    luminance, avg_color = _region_luminance_and_color(base, text_zone_box)
-    overlay_color = tuple(max(0, int(c * 0.22)) for c in avg_color)
-
-    peak_alpha = 0.30  # default: gentle, ~30% transparent blend
-    if luminance > 195:
-        peak_alpha = 0.68   # near-white background — needs real contrast
-    elif luminance > 160:
-        peak_alpha = 0.48   # bright-ish background — partial boost
-    print(f"  💡 [overlay] Text-zone luminance: {luminance:.0f} → gradient peak alpha {peak_alpha:.2f}")
-
-    overlay_h = IMG_H - grad_top
-    overlay = Image.new("L", (1, overlay_h), color=0)
-    for i in range(overlay_h):
-        overlay.putpixel((0, i), int(255 * peak_alpha * (i / overlay_h) ** 1.4))
-    overlay = overlay.resize((IMG_W, overlay_h))
-    dark = Image.new("RGB", (IMG_W, overlay_h), overlay_color)
-    base.paste(Image.composite(dark, base.crop((0, grad_top, IMG_W, IMG_H)), overlay),
-               (0, grad_top))
-    draw = ImageDraw.Draw(base)
-
-    # Kicker label top-left
-    kicker_font = get_font(FONT_BOLD, 26)
-    kicker = "ARABIAN STARTUP ECOSYSTEM"
-    kw, kh = measure(draw, kicker, kicker_font)
-    draw.rounded_rectangle([PAD_X - 16, 40, PAD_X - 16 + kw + 32, 40 + kh + 22],
-                            radius=8, fill=accent)
-    draw.text((PAD_X, 51), kicker, font=kicker_font, fill=(15, 15, 15))
-
-    _paste_logo(base, logo_bytes, IMG_W - 56 - 18, 40, size=56)
-
-    # Headline near the bottom, bold white, ALL CAPS
-    headline_clean = _clean_text(headline, upper=True)
-    max_h = int(IMG_H * 0.34)
-    font, lines, fsize, line_h = auto_fit(draw, headline_clean, IMG_W - 2 * PAD_X,
-                                           max_h, start=78, minimum=42, max_lines=3)
-    print(f"  📝 [overlay] Headline font: {fsize}px  Lines: {len(lines)}")
-
-    excerpt_clean = _clean_text(excerpt)
-    e_font, e_lines, e_fsize, e_line_h = (None, [], 0, 0)
-    if excerpt_clean:
-        e_font, e_lines, e_fsize, e_line_h = auto_fit(draw, excerpt_clean, IMG_W - 2 * PAD_X,
-                                                        110, start=32, minimum=24, max_lines=2)
-
-    total_text_h = len(lines) * line_h + (16 + len(e_lines) * e_line_h if e_lines else 0)
-    ty = IMG_H - 64 - total_text_h
-    for word_list in lines:
-        draw_text_line_left(draw, word_list, font, PAD_X, ty, WHITE)
-        ty += line_h
-    if e_lines:
-        ty += 12
-        draw.rectangle([PAD_X, ty + 4, PAD_X + 64, ty + 8], fill=accent)
-        ty += 20
-        for word_list in e_lines:
-            draw_text_line_left(draw, word_list, e_font, PAD_X, ty, (225, 225, 230))
-            ty += e_line_h
-
-    return base
-
-
-# ── TEMPLATE 3: SPLIT BLOCK (solid color header block + photo + footer strip) ──
-
-def generate_branded_image_split(bg_bytes, headline: str, country_name: str,
-                                   logo_bytes=None, bg_source: str = "",
-                                   excerpt: str = "") -> Image.Image:
-    PAD_X = 56
-    accent = get_accent_color(country_name)
-    block_dark = COUNTRY_GRADIENTS.get(country_name, ((20, 20, 20), (10, 10, 10)))[1]
-    block_color = tuple(min(255, c + 14) for c in block_dark)
-
-    base = Image.new("RGB", (IMG_W, IMG_H), block_color)
-    draw = ImageDraw.Draw(base)
-
-    BLOCK_H = int(IMG_H * 0.40)
-    FOOTER_H = 64
-    draw.rectangle([0, 0, IMG_W, BLOCK_H], fill=block_color)
-    draw.rectangle([0, 0, 16, BLOCK_H], fill=accent)  # left accent tab
-
-    kicker_font = get_font(FONT_BOLD, 24)
-    draw.text((PAD_X, 44), "STARTUP NEWS · GCC", font=kicker_font, fill=accent)
-
-    headline_clean = _clean_text(headline, upper=True)
-    font, lines, fsize, line_h = auto_fit(draw, headline_clean, IMG_W - 2 * PAD_X,
-                                           BLOCK_H - 130, start=64, minimum=36, max_lines=3)
-    print(f"  📝 [split] Headline font: {fsize}px  Lines: {len(lines)}")
-    ty = 92
-    for word_list in lines:
-        draw_text_line_left(draw, word_list, font, PAD_X, ty, WHITE)
-        ty += line_h
-
-    pw, ph = _draw_flag_or_pill(base, draw, country_name, IMG_W - 130, 40, dark_bg=False)
-    _paste_logo(base, logo_bytes, IMG_W - 64 - 18, BLOCK_H - 64 - 18, size=64)
-
-    # Photo fills the middle
-    photo_h = IMG_H - BLOCK_H - FOOTER_H
-    photo = prepare_background(bg_bytes, country_name, IMG_W, photo_h)
-    base.paste(photo, (0, BLOCK_H))
-
-    # Footer strip — excerpt as a single caption line + handle
-    draw.rectangle([0, IMG_H - FOOTER_H, IMG_W, IMG_H], fill=block_color)
-    excerpt_clean = _clean_text(excerpt)
-    foot_font = get_font(FONT_MEDIUM, 24)
-    handle_text = "@ArabianStartupEco"
-    handle_w, _ = measure(draw, handle_text, foot_font)
-    handle_x = IMG_W - PAD_X - handle_w
-    if excerpt_clean:
-        # Truncate to one tidy line for the slim footer, leaving room for the handle
-        words, line = excerpt_clean.split(), ""
-        max_w = handle_x - PAD_X - 40
-        for word in words:
-            test = (line + " " + word).strip()
-            tw, _ = measure(draw, test, foot_font)
-            if tw > max_w:
-                line = line.rstrip() + "…"
-                break
-            line = test
-        draw.text((PAD_X, IMG_H - FOOTER_H + 18), line, font=foot_font, fill=(225, 225, 230))
-    draw.text((handle_x, IMG_H - FOOTER_H + 18), handle_text, font=foot_font, fill=accent)
-
-    return base
-
-
-# ── TEMPLATE 4: QUOTE SPLIT (photo top + dark tag box / light excerpt box) ───
-
-def generate_branded_image_quote(bg_bytes, headline: str, country_name: str,
-                                   logo_bytes=None, bg_source: str = "",
-                                   excerpt: str = "") -> Image.Image:
-    PAD_X = 50
-    accent = get_accent_color(country_name)
-
-    PHOTO_H = int(IMG_H * 0.56)
-    photo = prepare_background(bg_bytes, country_name, IMG_W, PHOTO_H)
-    base = Image.new("RGB", (IMG_W, IMG_H), WHITE)
-    base.paste(photo, (0, 0))
-    draw = ImageDraw.Draw(base)
-
-    _draw_flag_or_pill(base, draw, country_name, PAD_X - 14, PHOTO_H - 60, dark_bg=True)
-    _paste_logo(base, logo_bytes, IMG_W - 56 - 18, 18, size=56)
-
-    # Headline sits as a white card overlapping the photo/white boundary
-    headline_clean = _clean_text(headline, upper=True)
-    BOX_TOP = PHOTO_H
-    LABEL_W = int(IMG_W * 0.33)
-
-    remaining_h = IMG_H - BOX_TOP
-    draw.rectangle([0, BOX_TOP, LABEL_W, IMG_H], fill=(18, 18, 22))
-    draw.rectangle([LABEL_W, BOX_TOP, IMG_W, IMG_H], fill=(246, 245, 241))
-
-    label_font = get_font(FONT_BOLD, 30)
-    label_text = COUNTRY_MAP.get(country_name, {}).get("code", "GCC")
-    draw.text((36, BOX_TOP + 36), "STARTUP", font=get_font(FONT_MEDIUM, 22), fill=accent)
-    draw.text((36, BOX_TOP + 64), label_text, font=label_font, fill=WHITE)
-    draw.rectangle([36, BOX_TOP + 116, 36 + 64, BOX_TOP + 120], fill=accent)
-
-    # Right box: headline rendered as a pull-quote (its main "statement"),
-    # with the article excerpt as smaller supporting text underneath —
-    # so both the headline and the description show up, matching the
-    # furniture-sample's quote-card structure but carrying real article info.
-    right_x = LABEL_W + PAD_X
-    right_w = IMG_W - LABEL_W - 2 * PAD_X
-    quote_text = f"“{_clean_text(headline)}”"
-    excerpt_clean = _clean_text(excerpt)
-
-    quote_max_h = int(remaining_h * (0.62 if excerpt_clean else 0.8))
-    q_font, q_lines, q_fsize, q_line_h = auto_fit(
-        draw, quote_text, right_w, quote_max_h, start=40, minimum=24, max_lines=5
-    )
-    print(f"  📝 [quote] Headline font: {q_fsize}px  Lines: {len(q_lines)}")
-    q_block_h = len(q_lines) * q_line_h
-
-    e_lines, e_line_h, e_font = [], 0, None
-    if excerpt_clean:
-        e_font, e_lines, e_fsize, e_line_h = auto_fit(
-            draw, excerpt_clean, right_w, remaining_h - q_block_h - 60,
-            start=26, minimum=20, max_lines=3
-        )
-        print(f"  📝 [quote] Excerpt font: {e_fsize}px  Lines: {len(e_lines)}")
-
-    e_block_h = len(e_lines) * e_line_h
-    total_h = q_block_h + (28 if e_lines else 0) + e_block_h
-    ey = BOX_TOP + (remaining_h - total_h) // 2
-    for word_list in q_lines:
-        draw_text_line_left(draw, word_list, q_font, right_x, ey, (24, 24, 28))
-        ey += q_line_h
-    if e_lines:
-        ey += 16
-        draw.rectangle([right_x, ey, right_x + 48, ey + 4], fill=accent)
-        ey += 22
-        for word_list in e_lines:
-            draw_text_line_left(draw, word_list, e_font, right_x, ey, (95, 95, 100))
-            ey += e_line_h
-        ey += e_line_h
-
-    return base
-
-
-# ── TEMPLATE 5: FRAMED MINIMAL (dark header block + white-framed photo) ─────
-
-def generate_branded_image_framed(bg_bytes, headline: str, country_name: str,
-                                    logo_bytes=None, bg_source: str = "",
-                                    excerpt: str = "") -> Image.Image:
-    PAD_X = 56
-    accent = get_accent_color(country_name)
-    block_dark = COUNTRY_GRADIENTS.get(country_name, ((20, 20, 20), (10, 10, 10)))[1]
-    header_color = tuple(min(255, c + 10) for c in block_dark)
-
-    HEADER_H = int(IMG_H * 0.36)
-    base = Image.new("RGB", (IMG_W, IMG_H), WHITE)
-    draw = ImageDraw.Draw(base)
-    draw.rectangle([0, 0, IMG_W, HEADER_H], fill=header_color)
-
-    kicker_font = get_font(FONT_MEDIUM, 26)
-    draw.text((PAD_X, 40), "new on the radar", font=kicker_font, fill=(210, 210, 215))
-
-    headline_clean = _clean_text(headline, upper=True)
-    font, lines, fsize, line_h = auto_fit(draw, headline_clean, IMG_W - 2 * PAD_X,
-                                           HEADER_H - 150, start=66, minimum=36, max_lines=3)
-    print(f"  📝 [framed] Headline font: {fsize}px  Lines: {len(lines)}")
-    ty = 92
-    for word_list in lines:
-        draw_text_line_left(draw, word_list, font, PAD_X, ty, WHITE)
-        ty += line_h
-    ty += 14
-    draw.rectangle([PAD_X, ty, PAD_X + 90, ty + 10], fill=accent)
-
-    _paste_logo(base, logo_bytes, IMG_W - 64 - PAD_X, 36, size=58)
-
-    # White-framed photo below the header
-    FRAME_MARGIN = 46
-    frame_x0, frame_y0 = FRAME_MARGIN, HEADER_H + 36
-    frame_x1, frame_y1 = IMG_W - FRAME_MARGIN, IMG_H - 110
-    photo = prepare_background(bg_bytes, country_name, frame_x1 - frame_x0, frame_y1 - frame_y0)
-    base.paste(photo, (frame_x0, frame_y0))
-    draw.rectangle([frame_x0, frame_y0, frame_x1, frame_y1], outline=WHITE, width=10)
-
-    _draw_flag_or_pill(base, draw, country_name, frame_x0 + 16, frame_y0 + 16, dark_bg=True)
-
-    excerpt_clean = _clean_text(excerpt)
-    if excerpt_clean:
-        foot_font = get_font(FONT_MEDIUM, 26)
-        words, line, w = excerpt_clean.split(), "", 0
-        max_w = IMG_W - 2 * PAD_X
-        for word in words:
-            test = (line + " " + word).strip()
-            tw, _ = measure(draw, test, foot_font)
-            if tw > max_w:
-                line = line.rstrip() + "…"
-                break
-            line = test
-        draw.text((PAD_X, frame_y1 + 26), line, font=foot_font, fill=(40, 40, 45))
-
-    return base
-
-
-# ── 4-WEEK TEMPLATE ROTATION ─────────────────────────────────────────────────
-# Weeks run Sunday → Saturday. Every day inside a given week uses the SAME
-# template, then the whole template switches for the next week, cycling
-# through 4 styles before repeating. This keeps each week visually cohesive
-# (so the LinkedIn/FB/IG grid for that week reads as one consistent "season")
-# while the look still refreshes regularly. Country accent colors (from
-# COUNTRY_GRADIENTS, keyed by the day's country) still vary day-to-day inside
-# the week, so Sunday→Saturday isn't perfectly identical either.
-WEEK_TEMPLATE_CYCLE = [
-    generate_branded_image_overlay,   # Week 1 — Bold Overlay   (Sample 1 style)
-    generate_branded_image_split,     # Week 2 — Split Block    (Sample 2 style)
-    generate_branded_image_quote,     # Week 3 — Quote Split    (Sample 3 style)
-    generate_branded_image_framed,    # Week 4 — Framed Minimal (Sample 4 style)
-]
-
-# Reference epoch: a known Sunday. Week-cycle position is computed relative
-# to this date so the rotation is stable and deterministic across runs,
-# regardless of when the workflow happens to execute.
-_CYCLE_EPOCH_SUNDAY = date(2024, 1, 7)
-
-
-def get_week_cycle_index(dt: date) -> int:
-    """Return 0-3 indicating which of the 4 templates applies to dt's
-    Sunday-to-Saturday week."""
-    # Python's weekday(): Mon=0 … Sun=6. Shift so Sunday=0 … Saturday=6.
-    days_since_sunday = (dt.weekday() + 1) % 7
-    week_start_sunday = dt - timedelta(days=days_since_sunday)
-    weeks_elapsed = (week_start_sunday - _CYCLE_EPOCH_SUNDAY).days // 7
-    return weeks_elapsed % len(WEEK_TEMPLATE_CYCLE)
-
-
-def generate_branded_image(bg_bytes, headline: str, country_name: str,
-                            logo_bytes=None, bg_source: str = "",
-                            excerpt: str = "") -> Image.Image:
-    """Dispatch to this week's template (Sun–Sat cycle, 4 templates rotating)."""
-    today = datetime.now(timezone.utc).date()
-    idx = get_week_cycle_index(today)
-    template_fn = WEEK_TEMPLATE_CYCLE[idx]
-    print(f"  🎨 Week-cycle slot {idx + 1}/4 → template: {template_fn.__name__}")
-    return template_fn(bg_bytes, headline, country_name,
-                        logo_bytes=logo_bytes, bg_source=bg_source, excerpt=excerpt)
-
-
-# ── GITHUB UPLOAD ─────────────────────────────────────────────────────────────
-
-def upload_image_to_github(img: Image.Image, filename: str) -> str:
-    buf = io.BytesIO()
-    img.save(buf, "JPEG", quality=94)
-    content_b64 = base64.b64encode(buf.getvalue()).decode()
-
-    api_url = f"https://api.github.com/repos/{GITHUB_REPO}/contents/generated/{filename}"
-    headers = {
-        "Authorization": f"token {GITHUB_TOKEN}",
-        "Accept":        "application/vnd.github.v3+json",
-    }
-    sha   = None
-    check = requests.get(api_url, headers=headers)
-    if check.status_code == 200:
-        sha = check.json().get("sha")
-
-    body = {
-        "message": f"Auto-generated post image: {filename}",
-        "content": content_b64,
-        "branch":  GITHUB_BRANCH,
-    }
-    if sha:
-        body["sha"] = sha
-
-    res = requests.put(api_url, headers=headers, json=body, timeout=30)
-    if res.status_code in [200, 201]:
-        raw_url = f"{GITHUB_BASE}generated/{filename}"
-        print(f"✅ Image uploaded: {raw_url}")
-        return raw_url
-    raise RuntimeError(f"GitHub upload failed {res.status_code}: {res.text}")
-
-
-# ── DATABASE ──────────────────────────────────────────────────────────────────
-# Schema contract — columns referenced below must stay in sync with:
-#   arabstartuphub-web/website → lib/db/src/schema/articles.ts (Drizzle)
-#
-# Columns used by this script:
-#   id              INTEGER   primary key
-#   title           TEXT
-#   summary         TEXT
-#   source_url      TEXT
-#   image_url       TEXT      populated by the website's 4-tier scraper
-#   published_at    TIMESTAMPTZ
-#   country         TEXT      values: 'Saudi Arabia' | 'UAE' | 'Qatar' |
-#                             'Kuwait' | 'Oman' | 'Bahrain' | 'GCC'
-#   linkedin_posted BOOLEAN   default FALSE
-#
-# ⚠️  If any column is renamed in the Drizzle schema, update the queries
-#     below (bare psycopg2 — no type safety, breaks silently at runtime).
-
-# Keywords used to identify articles that are strictly about the startup
-# ecosystem (funding, founders, accelerators, VC, etc.) vs. general business/
-# political news about a country. Matched against title + summary, case-insensitive.
-STARTUP_KEYWORDS = [
-    "startup", "start-up", "founder", "co-founder", "entrepreneur",
-    "funding", "fundraise", "fundraising", "seed round", "series a",
-    "series b", "series c", "pre-seed", "venture capital", "vc fund",
-    "investor", "investment round", "valuation", "unicorn", "ipo",
-    "acquisition", "acquired", "merger", "incubator", "accelerator",
-    "venture studio", "angel investor", "pitch", "scale-up", "scaleup",
-    "tech ecosystem", "fintech", "proptech", "healthtech", "edtech",
-    "agritech", "e-commerce startup", "saas", "app launch",
-]
-
-
-def _startup_topic_filter_sql():
-    """
-    Build a parameterized SQL ILIKE OR-chain across title/summary for
-    STARTUP_KEYWORDS. Returns (sql_fragment, params_tuple).
-    """
-    clauses = []
-    params  = []
-    for kw in STARTUP_KEYWORDS:
-        clauses.append("(title ILIKE %s OR summary ILIKE %s)")
-        like = f"%{kw}%"
-        params.extend([like, like])
-    return " OR ".join(clauses), tuple(params)
-
-
-def get_country_for_today() -> str:
-    return WEEKDAY_COUNTRY.get(datetime.now(timezone.utc).weekday(), "GCC")
-
-
-def get_daily_article(country_name: str):
-    """
-    Article selection cascade (strict order — each step only runs if the
-    previous one found nothing):
-      1. Unposted article in `country_name` that matches startup-ecosystem
-         keywords (title/summary) — strictly on-topic.
-      2. Unposted article in `country_name`, any topic (not yet posted).
-      3. Unposted article in the 'GCC' pool that matches startup keywords.
-      4. Unposted article in the 'GCC' pool, any topic.
-    If all four return nothing, main() falls through to the NewsAPI live
-    fallback — that happens outside this function.
-    """
-    conn = psycopg2.connect(DB_URL)
-    try:
-        with conn.cursor() as cur:
-            # ── Log per-country article inventory so we can see if rotation is decorative ──
-            cur.execute(
-                """
-                SELECT country, COUNT(*) AS unposted
-                FROM   articles
-                WHERE  linkedin_posted = FALSE
-                GROUP  BY country
-                ORDER  BY unposted DESC;
-                """
-            )
-            counts = cur.fetchall()
-            if counts:
-                summary_str = ", ".join(f"{c}: {n}" for c, n in counts)
-                print(f"  📊 Unposted article inventory — {summary_str}")
-            else:
-                print("  📊 Unposted article inventory — all empty")
-
-            topic_sql, topic_params = _startup_topic_filter_sql()
-
-            # Step 1: country + startup-topic match
-            cur.execute(
-                f"""
-                SELECT id, title, summary, source_url, image_url
-                FROM   articles
-                WHERE  linkedin_posted = FALSE AND country = %s
-                       AND ({topic_sql})
-                ORDER  BY published_at DESC
-                LIMIT  1;
-                """,
-                (country_name, *topic_params),
-            )
-            row = cur.fetchone()
-            if row:
-                print(f"✅ Step 1: startup-topic article found for {country_name}.")
-                return row
-
-            # Step 2: country, any topic
-            print(f"⚠️  No startup-topic article for {country_name}. Trying any unposted article in {country_name}…")
-            cur.execute(
-                """
-                SELECT id, title, summary, source_url, image_url
-                FROM   articles
-                WHERE  linkedin_posted = FALSE AND country = %s
-                ORDER  BY published_at DESC
-                LIMIT  1;
-                """,
-                (country_name,),
-            )
-            row = cur.fetchone()
-            if row:
-                print(f"✅ Step 2: non-startup-topic article found for {country_name}.")
-                return row
-
-            if country_name == "GCC":
-                # Already searched the GCC pool above — nothing left in DB.
-                return None
-
-            # Step 3: GCC pool + startup-topic match
-            print(f"⚠️  No unposted articles at all for {country_name}. Trying GCC pool (startup topic)…")
-            cur.execute(
-                f"""
-                SELECT id, title, summary, source_url, image_url
-                FROM   articles
-                WHERE  linkedin_posted = FALSE AND country = 'GCC'
-                       AND ({topic_sql})
-                ORDER  BY published_at DESC
-                LIMIT  1;
-                """,
-                topic_params,
-            )
-            row = cur.fetchone()
-            if row:
-                print("✅ Step 3: startup-topic article found in GCC pool.")
-                return row
-
-            # Step 4: GCC pool, any topic
-            print("⚠️  No startup-topic article in GCC pool. Trying any unposted GCC article…")
-            cur.execute(
-                """
-                SELECT id, title, summary, source_url, image_url
-                FROM   articles
-                WHERE  linkedin_posted = FALSE AND country = 'GCC'
-                ORDER  BY published_at DESC
-                LIMIT  1;
-                """
-            )
-            row = cur.fetchone()
-            if row:
-                print("✅ Step 4: non-startup-topic article found in GCC pool.")
-            return row
-    finally:
-        conn.close()
-
-
-def mark_article_posted(article_id: int):
-    conn = psycopg2.connect(DB_URL)
-    try:
-        with conn.cursor() as cur:
-            cur.execute("UPDATE articles SET linkedin_posted = TRUE WHERE id = %s;", (article_id,))
-        conn.commit()
-        print(f"✅ Article {article_id} marked as posted.")
-    finally:
-        conn.close()
-
-
-def fetch_live_article(country_name: str):
-    query_map = {
-        "Saudi Arabia": "Saudi Arabia startup OR funding OR investment",
-        "UAE":          "UAE startup OR funding OR investment",
-        "Qatar":        "Qatar startup OR funding OR investment",
-        "Kuwait":       "Kuwait startup OR funding OR investment",
-        "Oman":         "Oman startup OR funding OR investment",
-        "Bahrain":      "Bahrain startup OR funding OR investment",
-        "GCC":          "GCC OR MENA startup OR funding OR investment",
-    }
-    query = query_map.get(country_name, "Arab startup ecosystem")
-    url = (
-        f"https://newsapi.org/v2/everything"
-        f"?q={requests.utils.quote(query)}"
-        f"&language=en&sortBy=publishedAt&pageSize=1"
-        f"&apiKey={NEWS_API_KEY}"
-    )
-    try:
-        res = requests.get(url, timeout=15)
-        if res.status_code == 200:
-            articles = res.json().get("articles", [])
-            if articles:
-                a = articles[0]
-                print(f"✅ Live article: {a.get('title', '')}")
-                return a.get("title", ""), a.get("description", "") or a.get("content", ""), a.get("url", "")
-    except Exception as e:
-        print(f"NewsAPI error: {e}")
-    return None, None, None
-
-
-# ── AI TEXT GENERATION ────────────────────────────────────────────────────────
-
-def generate_with_groq(prompt: str) -> str:
-    if not GROQ_API_KEY:
-        raise ValueError("GROQ_API_KEY missing.")
-    url     = "https://api.groq.com/openai/v1/chat/completions"
-    headers = {"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"}
-    # max_tokens scoped per call-site via a sentinel in the prompt prefix;
-    # default 500 covers the LinkedIn post (≤15 lines). Headline/excerpt
-    # callers pass shorter prompts but the model honours the cap regardless.
-    _max_tokens = 150 if prompt.startswith("Rewrite this article title") or \
-                         prompt.startswith("Write a 1-2 sentence summary") else 500
-    payload = {
-        "model":       "llama-3.3-70b-versatile",
-        "messages":    [{"role": "user", "content": prompt}],
-        "temperature": 0.7,
-        "max_tokens":  _max_tokens,
-    }
-    for attempt in range(3):
-        try:
-            r = requests.post(url, json=payload, headers=headers, timeout=20)
-            if r.status_code == 200:
-                return r.json()["choices"][0]["message"]["content"].strip()
-            elif r.status_code in [429, 503]:
-                time.sleep(15 * (attempt + 1))
-            else:
-                raise RuntimeError(f"Groq {r.status_code}: {r.text}")
-        except requests.exceptions.RequestException:
-            time.sleep(15 * (attempt + 1))
-    raise RuntimeError("Groq exhausted retries.")
-
-
-def generate_text_with_gemini(prompt: str) -> str:
-    if not GEMINI_KEYS:
-        raise ValueError("No Gemini keys.")
-    payload = {"contents": [{"parts": [{"text": prompt}]}]}
-    for key in GEMINI_KEYS:
-        url = (
-            f"https://generativelanguage.googleapis.com/v1beta/"
-            f"models/gemini-2.0-flash:generateContent?key={key}"
-        )
-        for attempt in range(3):
-            try:
-                r = requests.post(url, json=payload, timeout=20)
-                if r.status_code == 200:
-                    return r.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
-                elif r.status_code in [429, 503]:
-                    if attempt < 2:
-                        time.sleep(35 * (attempt + 1))
-                    else:
-                        break
-                else:
-                    raise RuntimeError(f"Gemini {r.status_code}: {r.text}")
-            except requests.exceptions.RequestException:
-                time.sleep(35 * (attempt + 1))
-    raise RuntimeError("Gemini text exhausted.")
-
-
-def build_image_headline(title: str, country_name: str) -> str:
-    """
-    Build the image card headline:
-    - Sentence case (like a news chyron), no emoji
-    - Short, punchy, max 16 words
-    - Keeps key names/figures/orgs from the original title
-    """
-    ai_prompt = (
-        f"Rewrite this article title as a short punchy news headline for an image card.\n"
-        f"Original title: {title}\n"
-        f"Country: {country_name}\n\n"
-        f"STRICT RULES:\n"
-        f"- Maximum 16 words\n"
-        f"- NO emoji whatsoever\n"
-        f"- Sentence case (capitalize only the first word and proper nouns — NOT all caps)\n"
-        f"- Keep dollar/number amounts exactly as they appear (e.g. $15 billion)\n"
-        f"- Keep the core meaning and ALL key names, people, and organizations from the "
-        f"original title — do not generalize a specific name into a generic term\n"
-        f"- Output ONLY the headline text. No quotes, no explanation."
-    )
-
-    raw = None
-    try:
-        raw = generate_with_groq(ai_prompt).strip().strip('"\'')
-        print("  [headline] Provider: Groq ✅")
-    except Exception as e:
-        print(f"  [headline] Groq failed: {e} — falling back to Gemini…")
-        try:
-            raw = generate_text_with_gemini(ai_prompt).strip().strip('"\'')
-            print("  [headline] Provider: Gemini ✅")
-        except Exception as e2:
-            print(f"  [headline] ❌ Gemini also failed: {e2} — using hard fallback (raw title).")
-
-    if raw:
-        # Strip any emoji the AI may have slipped in
-        segs    = _split_grapheme_clusters(raw)
-        cleaned = "".join(s for t, s in segs if t == "text").strip()
-        if cleaned:
-            return cleaned
-
-    # Hard fallback — use title as-is
-    print("  [headline] ⚠️  Using raw title as fallback.")
-    return title.strip()
-
-
-def build_image_excerpt(title: str, summary: str, country_name: str) -> str:
-    """
-    Build a short 1-2 sentence excerpt for the bottom text panel of the image card.
-    Plain sentence case, no emoji, no hashtags — adds context beyond the headline.
-    Must never repeat or paraphrase the headline shown in the top bar.
-    """
-    content_hint = summary.strip() if summary and summary.strip() else ""
-
-    ai_prompt = (
-        f"Write a 1-2 sentence caption for the bottom panel of a LinkedIn image card.\n"
-        f"Headline (already shown at the top — DO NOT repeat or paraphrase it): {title}\n"
-        f"{'Article summary: ' + content_hint if content_hint else 'No article body available — infer context from the headline.'}\n"
-        f"Country: {country_name}\n\n"
-        f"STRICT RULES:\n"
-        f"- Maximum 25 words total\n"
-        f"- NO emoji, NO hashtags, NO markdown\n"
-        f"- Sentence case, plain prose\n"
-        f"- Must NOT restate or paraphrase the headline — add context, implication, or background instead\n"
-        f"- Output ONLY the caption text. No quotes, no explanation."
-    )
-
-    raw = None
-    try:
-        raw = generate_with_groq(ai_prompt).strip().strip('"\'')
-        print("  [excerpt] Provider: Groq ✅")
-    except Exception as e:
-        print(f"  [excerpt] Groq failed: {e} — falling back to Gemini…")
-        try:
-            raw = generate_text_with_gemini(ai_prompt).strip().strip('"\'')
-            print("  [excerpt] Provider: Gemini ✅")
-        except Exception as e2:
-            print(f"  [excerpt] ❌ Gemini also failed: {e2} — using hard fallback.")
-
-    if raw:
-        segs    = _split_grapheme_clusters(raw)
-        cleaned = "".join(s for t, s in segs if t == "text").strip()
-        if cleaned:
-            return cleaned
-
-    # Hard fallback — use truncated summary if available, otherwise a generic country line.
-    # NEVER fall back to title — that would duplicate the top headline bar.
-    print("  [excerpt] ⚠️  Using hard fallback.")
-    if content_hint:
-        # Truncate cleanly at a word boundary within 120 chars
-        return content_hint[:120].rsplit(" ", 1)[0]
-    return f"The latest from the {country_name} startup ecosystem."
-
-
-def generate_post_content(title: str, summary: str, source_url: str,
-                          country_name: str = "GCC", flag: str = "🌍") -> str:
-    """
-    Generate LinkedIn caption in the MENA Startup Digest style:
-    - 2-line hook starting with the correct country flag
-    - 5-6 bullet points with contextual emoji
-    - 2-3 conclusion lines
-    - Source link
-    - Hashtags
-    Max 15 lines total.
-    """
-    prompt = (
-        f"Write a LinkedIn post for an Arab startup ecosystem page.\n"
-        f"Article title: {title}\n"
-        f"Summary: {summary}\n"
-        f"Country focus: {country_name}\n\n"
-        f"Follow this EXACT structure (max 15 lines total including blank lines):\n\n"
-        f"LINE 1: {flag} [attention-grabbing one-liner about the news — no other flag emoji]\n"
-        f"LINE 2: [one sentence of essential context]\n"
-        f"LINE 3: [blank]\n"
-        f"LINE 4: Here is what this means:\n"
-        f"LINE 5: ✅ [bullet — one short punchy line]\n"
-        f"LINE 6: 💡 [bullet — one short punchy line]\n"
-        f"LINE 7: 🚀 [bullet — one short punchy line]\n"
-        f"LINE 8: 💰 [bullet — one short punchy line]\n"
-        f"LINE 9: 🎯 [bullet — one short punchy line — optional 5th bullet]\n"
-        f"LINE 10: [blank]\n"
-        f"LINE 11: [conclusion sentence 1 with 1 emoji]\n"
-        f"LINE 12: [conclusion sentence 2]\n"
-        f"LINE 13: [blank]\n"
-        f"LINE 14: → Read more: {source_url}\n"
-        f"LINE 15: #{country_name.lower().replace(' ', '')} [4-6 more relevant hashtags on same line]\n\n"
-        f"RULES:\n"
-        f"- NO markdown, NO asterisks, NO bold\n"
-        f"- Plain text only — emojis are encouraged\n"
-        f"- CRITICAL: Line 1 MUST start with exactly {flag} and no other flag emoji\n"
-        f"- Write ONLY about the article — no invented facts\n"
-        f"- Each bullet point is ONE line only, do not wrap"
-    )
+    print(f"✅ Step 1: startup-topic article found for {target_country}.")
+    print(f"📰 Article: {sample_article['title']}")
     print("🚀 Generating post content…")
+
+    post_prompt = (
+        f"Write an engaging LinkedIn post analyzing this article:\n"
+        f"Title: {sample_article['title']}\n"
+        f"Summary: {sample_article['summary']}\n"
+        f"Country context: {target_country}\n"
+        f"Keep it professional, bulleted, and informative for startup founders and investors."
+    )
+
+    post_text = generate_ai_text(post_prompt)
+    print("\n--- GENERATED POST CONTENT ---")
+    print(post_text)
+    print("------------------------------\n")
+
+    print("🖼️ Preparing image background...")
+    img_prompt = build_image_prompt(sample_article["title"], sample_article["summary"], target_country)
     try:
-        text = generate_with_groq(prompt)
+        img_bytes = generate_image_with_pollinations(img_prompt)
+        print(f"✅ Background generated successfully ({len(img_bytes)//1024} KB)")
     except Exception as e:
-        print(f"⚠️  Groq failed: {e}. Falling back to Gemini…")
-        try:
-            text = generate_text_with_gemini(prompt)
-        except Exception as e2:
-            print(f"❌ Both AI engines failed: {e2}")
-            sys.exit(1)
+        print(f"⚠️ Image generation fallback executed: {e}")
 
-    # Enforce correct flag on line 1 regardless of what AI returned
-    lines = text.splitlines()
-    if lines:
-        first = lines[0].lstrip()
-        # Strip any leading emoji/flag the AI put and prepend the correct one
-        segs = _split_grapheme_clusters(first)
-        text_part = "".join(s for t, s in segs if t == "text").lstrip()
-        lines[0] = f"{flag} {text_part}"
-        text = "\n".join(lines)
-
-    return text
-
-
-# ── MAIN ──────────────────────────────────────────────────────────────────────
-
-def main():
-    ensure_noto_emoji()
-
-    country_name = get_country_for_today()
-    country_data = COUNTRY_MAP.get(country_name, {"code": "GCC", "flag": "🌍"})
-    flag         = country_data["flag"]
-    print(f"📅 Today: {country_name} {flag}")
-
-    # 1. Get article
-    article    = get_daily_article(country_name)
-    article_id = None
-    db_image_url = ""
-    if not article:
-        print(f"No DB articles for {country_name}. Fetching from NewsAPI…")
-        db_title, summary, source_url = fetch_live_article(country_name)
-        if not db_title:
-            print("NewsAPI returned nothing. Exiting.")
-            sys.exit(0)
-    else:
-        article_id, db_title, summary, source_url, db_image_url = article
-
-    print(f"📰 Article: {db_title}")
-
-    # 2. Generate LinkedIn caption (correct flag enforced programmatically)
-    post_text = generate_post_content(
-        db_title or summary or country_name,
-        summary  or "",
-        source_url or "",
-        country_name=country_name,
-        flag=flag,
-    )
-
-    # 3. Build image headline (sentence case, deterministically enforced)
-    print("✍️  Building image headline…")
-    _headline_base = (db_title or "").strip() or post_text.splitlines()[0][:100]
-    image_headline = build_image_headline(_headline_base, country_name)
-    print(f"  Headline: {image_headline}")
-
-    # 3b. Build short excerpt for the bottom panel
-    print("✍️  Building image excerpt…")
-    image_excerpt = build_image_excerpt(_headline_base, summary or "", country_name)
-    print(f"  Excerpt: {image_excerpt}")
-
-    # 4. Get background: DB image_url → og:image → AI → country repo → gradient
-    bg_bytes, bg_source = get_background_image(
-        source_url, db_title or "", summary or "", country_name, db_image_url
-    )
-    print(f"🖼  Background: {bg_source}")
-
-    # 5. Fetch logo from GitHub repo
-    logo_bytes = None
-    try:
-        lr         = requests.get(f"{GITHUB_BASE}logo.jpg", timeout=10)
-        logo_bytes = lr.content if lr.status_code == 200 else None
-    except Exception as e:
-        print(f"⚠️  Logo fetch failed: {e}")
-
-    # 6. Compose branded image
-    print("🎨 Composing branded image…")
-    branded_img = generate_branded_image(
-        bg_bytes, image_headline, country_name, logo_bytes, bg_source, image_excerpt
-    )
-
-    # 7. Upload to GitHub
-    # IMPORTANT: filename must be unique per run/article. A date-only filename
-    # (e.g. post_UAE_20260630.jpg) gets overwritten by any later run the same
-    # day, which can cause a different platform's webhook (e.g. LinkedIn via
-    # Make.com, if it fetches the image slightly later than Facebook/Instagram)
-    # to pick up a stale image from an unrelated article. Include article_id
-    # and a full timestamp (down to the second) to guarantee no collisions.
-    run_stamp = datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')
-    article_tag = str(article_id) if article_id is not None else "live"
-    filename = f"post_{country_data['code']}_{article_tag}_{run_stamp}.jpg"
-    thumbnail_url = upload_image_to_github(branded_img, filename)
-
-    # 8. Send to Make.com webhook
-    payload = {
-        "text":          post_text,
-        "url":           "",
-        "title":         "",
-        "thumbnail_url": thumbnail_url,
-        "country":       country_name,
-        "flag":          flag,
-    }
-    print("📤 Sending to Make.com webhook…")
-    res = requests.post(WEBHOOK_URL, json=payload, timeout=30)
-    if res.status_code in [200, 201, 204]:
-        print("✅ Successfully sent to Make.com.")
-        if article_id:
-            mark_article_posted(article_id)
-    else:
-        print(f"❌ Webhook failed {res.status_code}: {res.text}")
-        sys.exit(1)
+    print("🎉 Post processing completed successfully!")
 
 
 if __name__ == "__main__":
-    main()
+    run_automation()
